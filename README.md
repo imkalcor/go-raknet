@@ -1,2 +1,2 @@
-# networking
-bedrock edition networking library built on top of the transport library
+# raknet
+bedrock edition networking library built on top of the user datagram protocol (UDP).
