@@ -43,9 +43,7 @@ func (pk *OpenConnectionRequest1) Write(buf *buffer.Buffer) (err error) {
 	}
 
 	remaining := pk.DiscoveringMTU - protocol.UDP_HEADER_SIZE - protocol.MESSAGE_ID_SIZE
-	emptyBuf := make([]byte, remaining)
-
-	if err = buf.Write(emptyBuf); err != nil {
+	if err = buf.AdvanceWriter(remaining); err != nil {
 		return
 	}
 

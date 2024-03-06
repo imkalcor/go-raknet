@@ -20,4 +20,5 @@ const (
 	IDConnectedPong                  ID = 0x03
 	IDDetectLostConnections          ID = 0x04
 	IDDisconnectNotification         ID = 0x15
+	IDGamePacket                     ID = 0xfe
 )
