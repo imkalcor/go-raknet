@@ -22,7 +22,7 @@ func (pk *ConnectionRequestAccepted) Read(buf *buffer.Buffer) (err error) {
 		return
 	}
 
-	if err = buf.AdvanceReader(2); err != nil {
+	if err = buf.ShiftReader(2); err != nil {
 		return
 	}
 
@@ -44,6 +44,10 @@ func (pk *ConnectionRequestAccepted) Read(buf *buffer.Buffer) (err error) {
 // Writes a connection request accepted message to the underlying buffer and returns an error if
 // the operation has failed
 func (pk *ConnectionRequestAccepted) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDConnectionRequestAccepted); err != nil {
+		return
+	}
+
 	if err = buf.WriteAddr(&pk.ClientAddress); err != nil {
 		return
 	}

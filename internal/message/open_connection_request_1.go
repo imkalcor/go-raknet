@@ -34,6 +34,10 @@ func (pk *OpenConnectionRequest1) Read(buf *buffer.Buffer) (err error) {
 // Writes an open connection request 1 into the buffer and returns an error if the operation
 // failed.
 func (pk *OpenConnectionRequest1) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDOpenConnectionRequest1); err != nil {
+		return
+	}
+
 	if err = buf.WriteMagic(); err != nil {
 		return
 	}
@@ -43,7 +47,7 @@ func (pk *OpenConnectionRequest1) Write(buf *buffer.Buffer) (err error) {
 	}
 
 	remaining := pk.DiscoveringMTU - protocol.UDP_HEADER_SIZE - protocol.MESSAGE_ID_SIZE
-	if err = buf.AdvanceWriter(remaining); err != nil {
+	if err = buf.ShiftWriter(remaining); err != nil {
 		return
 	}
 

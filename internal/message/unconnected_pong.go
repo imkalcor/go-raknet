@@ -38,6 +38,10 @@ func (pk *UnconnectedPong) Read(buf *buffer.Buffer) (err error) {
 // Writes an Unconnected Pong message to the underlying buffer and returns an error if the operation
 // failed.
 func (pk *UnconnectedPong) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDUnconnectedPong); err != nil {
+		return
+	}
+
 	if err = buf.WriteInt64(pk.SendTimestamp, byteorder.BigEndian); err != nil {
 		return
 	}

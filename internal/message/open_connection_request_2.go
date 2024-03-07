@@ -43,6 +43,10 @@ func (pk *OpenConnectionRequest2) Read(buf *buffer.Buffer) (err error) {
 // Writes an open connection request 2 to the buffer and returns an error if the operation
 // has failed
 func (pk *OpenConnectionRequest2) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDOpenConnectionRequest2); err != nil {
+		return
+	}
+
 	if err = buf.WriteMagic(); err != nil {
 		return
 	}

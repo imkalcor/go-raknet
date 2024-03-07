@@ -19,6 +19,10 @@ func (pk *ConnectedPing) Read(buf *buffer.Buffer) (err error) {
 
 // Writes a connected ping message and returns an error if the operation has failed
 func (pk *ConnectedPing) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDConnectedPing); err != nil {
+		return
+	}
+
 	err = buf.WriteInt64(pk.ClientTimestamp, byteorder.BigEndian)
 	return
 }

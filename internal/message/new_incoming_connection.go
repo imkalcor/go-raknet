@@ -40,6 +40,10 @@ func (pk *NewIncomingConnection) Read(buf *buffer.Buffer) (err error) {
 // Writes a new incoming connection message to the buffer and returns an error if the operation
 // has failed
 func (pk *NewIncomingConnection) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDNewIncomingConnection); err != nil {
+		return
+	}
+
 	if err = buf.WriteAddr(&pk.ServerAddress); err != nil {
 		return
 	}

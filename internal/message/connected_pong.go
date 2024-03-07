@@ -30,6 +30,10 @@ func (pk *ConnectedPong) Read(buf *buffer.Buffer) (err error) {
 // Writes a connected pong message from the buffer and returns an error if the operation
 // has failed
 func (pk *ConnectedPong) Write(buf *buffer.Buffer) (err error) {
+	if err = buf.WriteUint8(IDConnectedPong); err != nil {
+		return
+	}
+
 	if err = buf.WriteInt64(pk.ClientTimestamp, byteorder.BigEndian); err != nil {
 		return
 	}

@@ -5,10 +5,10 @@ const PROTOCOL_VERSION byte = 11
 
 // This specifies the maximum MTU size that a Raknet Datagram cannot exceed. If it does,
 // it will be fragmented.
-const MAX_MTU_SIZE int = 1500
+const MAX_MTU_SIZE uint16 = 1500
 
 // This specifies the minimum MTU size that a Raknet Datagram must have.
-const MIN_MTU_SIZE int = 500
+const MIN_MTU_SIZE uint16 = 500
 
 // This is the size taken by a raknet message to represent the ID in bytes
 const MESSAGE_ID_SIZE int = 1
