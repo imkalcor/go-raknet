@@ -2,6 +2,7 @@ package raknet
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"time"
 
@@ -10,20 +11,37 @@ import (
 	"github.com/gamevidea/raknet/internal/protocol"
 )
 
+// Wrapper carries the information about an outgoing raknet message such as the destination
+// and the message itself. It is sent through a channel to the write loop that runs on a separate
+// thread.
+type Wrapper struct {
+	dest net.UDPAddr
+	msg  message.Message
+}
+
+// DatagramMetrics help in keeping record of the number of datagrams that we receive from a connection in a second
+// It is useful for figuring out whether we are being spammed or flooded by large number of datagrams being
+// sent by a socket address.
+type DatagramMetrics struct {
+	timestamp time.Time
+	count     int
+}
+
 // Listener is an implementation of Raknet Listener built on top of a UDP socket. It provides an API
 // to accept Raknet Connections and read and write MCPE game packets in an ordered and reliable way.
 type Listener struct {
-	guid   int64
 	addr   *net.UDPAddr
 	socket *net.UDPConn
+	guid   int64
 
-	connections    map[string]*Connection
-	blocked        map[string]uint64
-	packetsPerSec  map[string]time.Time
-	invalidPackets map[string]uint8
+	connections map[string]*Connection
+	blocked     map[string]time.Time
 
-	buf    []byte
-	buffer *buffer.Buffer
+	datagramMetrics   map[string]*DatagramMetrics
+	datagramIntegrity map[string]byte
+
+	reader *buffer.Buffer
+	writer *buffer.Buffer
 }
 
 // Listen announces on the local network address. Creates a new Raknet Listener and binds the listener
@@ -39,21 +57,22 @@ func Listen(addr string) (*Listener, error) {
 		return nil, err
 	}
 
-	buf := make([]byte, protocol.MAX_MTU_SIZE)
-
 	listener := &Listener{
-		guid:           0,
-		addr:           udpAddr,
-		socket:         socket,
-		connections:    map[string]*Connection{},
-		blocked:        map[string]uint64{},
-		packetsPerSec:  map[string]time.Time{},
-		invalidPackets: map[string]uint8{},
-		buf:            buf,
-		buffer:         buffer.New(buf),
+		addr:              udpAddr,
+		socket:            socket,
+		guid:              rand.Int63(),
+		connections:       map[string]*Connection{},
+		blocked:           map[string]time.Time{},
+		datagramMetrics:   map[string]*DatagramMetrics{},
+		datagramIntegrity: map[string]byte{},
+		reader:            buffer.New(protocol.MAX_MTU_SIZE),
+		writer:            buffer.New(protocol.MAX_MTU_SIZE),
 	}
 
-	go listener.start()
+	ch := make(chan Wrapper)
+
+	go listener.startReadLoop(ch)
+	go listener.startWriteLoop(ch)
 
 	return listener, nil
 }
@@ -68,14 +87,12 @@ func (l *Listener) LocalAddr() *net.UDPAddr {
 	return l.addr
 }
 
-// Starts listening for datagrams from the socket that the listener is bound to.
-func (l *Listener) start() {
+// Starts the read loop that continuously reads any datagrams from the udp socket.
+func (l *Listener) startReadLoop(ch chan Wrapper) {
 	for {
-		l.buffer.Reset() // reset the buffer for next datagram
-
-		_, addr, err := l.socket.ReadFromUDP(l.buf)
+		_, addr, err := l.socket.ReadFromUDP(l.reader.Slice())
 		if err != nil {
-			fmt.Printf("Listener: %v\n", err)
+			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 
@@ -83,33 +100,49 @@ func (l *Listener) start() {
 			continue
 		}
 
-		if err := l.handle(addr); err != nil {
-			fmt.Printf("Listener: %v\n", err)
+		if err := l.handle(addr, ch); err != nil {
+			fmt.Printf("Error: %v\n", err)
 			continue
 		}
+
+		l.reader.Reset()
+	}
+}
+
+// Starts the write loop that flushes the outgoing datagrams to the udp socket
+func (l *Listener) startWriteLoop(ch chan Wrapper) {
+	for {
+		info := <-ch
+
+		if err := info.msg.Write(l.writer); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		if _, err := l.socket.WriteTo(l.writer.Bytes(), &info.dest); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		l.writer.Reset()
 	}
 }
 
 // Handle is called when an incoming unconnected message is received on the socket. It handles the message
 // by flushing the response for the message immediately.
-func (l *Listener) handle(addr *net.UDPAddr) error {
-	id, err := l.buffer.ReadUint8()
+func (l *Listener) handle(addr *net.UDPAddr, ch chan Wrapper) error {
+	id, err := l.reader.ReadUint8()
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("ID: %d\n", id)
-
 	switch id {
 	case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
-		msg := message.UnconnectedPing{}
-		return l.handleUnconnectedPing(addr, msg)
+		return l.handleUnconnectedPing(addr, ch)
 	case message.IDOpenConnectionRequest1:
-		msg := message.OpenConnectionRequest1{}
-		return l.handleOpenConnectionRequest1(addr, msg)
+		return l.handleOpenConnectionRequest1(addr, ch)
 	case message.IDOpenConnectionRequest2:
-		msg := message.OpenConnectionRequest2{}
-		return l.handleOpenConnectionRequest2(addr, msg)
+		return l.handleOpenConnectionRequest2(addr, ch)
 	default:
 		fmt.Printf("Listener: %v\n", err)
 		return nil
@@ -117,8 +150,9 @@ func (l *Listener) handle(addr *net.UDPAddr) error {
 }
 
 // Handles an incoming unconnected ping message
-func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, msg message.UnconnectedPing) (err error) {
-	if err = msg.Read(l.buffer); err != nil {
+func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+	msg := message.UnconnectedPing{}
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
 
@@ -128,20 +162,18 @@ func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, msg message.Unconnec
 		Data:          []byte("MCPE;Dedicated Server;390;1.14.60;0;10;13253860892328930865;Bedrock level;Survival;1;19132;19133;"),
 	}
 
-	if err = resp.Write(l.buffer); err != nil {
-		return
-	}
-
-	if _, err = l.socket.WriteTo(l.buffer.Bytes(), addr); err != nil {
-		return
+	ch <- Wrapper{
+		dest: *addr,
+		msg:  &resp,
 	}
 
 	return
 }
 
 // Handles an open connection request 1 message
-func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, msg message.OpenConnectionRequest1) (err error) {
-	if err = msg.Read(l.buffer); err != nil {
+func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+	msg := message.OpenConnectionRequest1{}
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
 
@@ -151,15 +183,14 @@ func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, msg message.O
 			ServerGUID:     l.guid,
 		}
 
-		if err = resp.Write(l.buffer); err != nil {
-			return
+		ch <- Wrapper{
+			dest: *addr,
+			msg:  &resp,
 		}
-
-		_, err = l.socket.WriteTo(l.buffer.Bytes(), addr)
 		return
 	}
 
-	mtu := uint16(msg.DiscoveringMTU)
+	mtu := msg.DiscoveringMTU
 	if mtu > protocol.MAX_MTU_SIZE || mtu < protocol.MIN_MTU_SIZE {
 		mtu = protocol.MAX_MTU_SIZE
 	}
@@ -167,27 +198,25 @@ func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, msg message.O
 	resp := message.OpenConnectionReply1{
 		ServerGUID:             l.guid,
 		Secure:                 false,
-		ServerPreferredMTUSize: mtu,
+		ServerPreferredMTUSize: uint16(mtu),
 	}
 
-	if err = resp.Write(l.buffer); err != nil {
-		return
-	}
-
-	if _, err = l.socket.WriteTo(l.buffer.Bytes(), addr); err != nil {
-		return
+	ch <- Wrapper{
+		dest: *addr,
+		msg:  &resp,
 	}
 
 	return
 }
 
 // Handles an open connection request 2 message
-func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, msg message.OpenConnectionRequest2) (err error) {
-	if err = msg.Read(l.buffer); err != nil {
+func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+	msg := message.OpenConnectionRequest2{}
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
 
-	mtu := msg.ClientPreferredMTUSize
+	mtu := int(msg.ClientPreferredMTUSize)
 	if mtu > protocol.MAX_MTU_SIZE || mtu < protocol.MIN_MTU_SIZE {
 		mtu = protocol.MAX_MTU_SIZE
 	}
@@ -195,18 +224,15 @@ func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, msg message.O
 	resp := message.OpenConnectionReply2{
 		ServerGUID:    l.guid,
 		ClientAddress: *addr,
-		MTUSize:       mtu,
+		MTUSize:       uint16(mtu),
 		Secure:        false,
 	}
 
-	if err = resp.Write(l.buffer); err != nil {
-		return
+	ch <- Wrapper{
+		dest: *addr,
+		msg:  &resp,
 	}
 
-	if _, err = l.socket.WriteTo(l.buffer.Bytes(), addr); err != nil {
-		return
-	}
-
-	l.connections[addr.String()] = &Connection{}
+	l.connections[addr.String()] = newConn(l.addr, addr, l.socket, mtu)
 	return
 }

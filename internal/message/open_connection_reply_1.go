@@ -7,7 +7,7 @@ import (
 
 // OpenConnectionReply1 is sent by the server in response to the OpenConnectionRequest1 message. It sends
 // the server guid, and server preferred MTU size that it has formulated from the empty buffer sent by the client
-// in OpenConnectionRequest1 packet to discover the MTU size of the connection.
+// in OpenConnectionRequest1 message to discover the MTU size of the connection.
 type OpenConnectionReply1 struct {
 	ServerGUID             int64
 	Secure                 bool

@@ -22,7 +22,7 @@ func (pk *ConnectionRequestAccepted) Read(buf *buffer.Buffer) (err error) {
 		return
 	}
 
-	if err = buf.ShiftReader(2); err != nil {
+	if err = buf.Shift(2); err != nil {
 		return
 	}
 

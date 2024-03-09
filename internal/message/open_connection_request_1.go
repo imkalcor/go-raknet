@@ -5,8 +5,8 @@ import (
 	"github.com/gamevidea/raknet/internal/protocol"
 )
 
-// OpenConnectionRequest1 is the first packet sent by the client in the login sequence for raknet. It contains
-// zero padding at the end of the packet to make the size of the packet reach a certain size known as the DiscoveringMTU.
+// OpenConnectionRequest1 is the first message sent by the client in the login sequence for raknet. It contains
+// zero padding at the end of the message to make the size of the message reach a certain size known as the DiscoveringMTU.
 // It is sent to know the maximum size of datagram that the network and the destination raknet server can handle.
 type OpenConnectionRequest1 struct {
 	Protocol byte
@@ -47,7 +47,7 @@ func (pk *OpenConnectionRequest1) Write(buf *buffer.Buffer) (err error) {
 	}
 
 	remaining := pk.DiscoveringMTU - protocol.UDP_HEADER_SIZE - protocol.MESSAGE_ID_SIZE
-	if err = buf.ShiftWriter(remaining); err != nil {
+	if err = buf.Shift(remaining); err != nil {
 		return
 	}
 

@@ -7,7 +7,7 @@ import (
 	"github.com/gamevidea/binary/byteorder"
 )
 
-// OpenConnectionRequest2 is the next packet in the login sequence sent by the client to the server.
+// OpenConnectionRequest2 is the next message in the login sequence sent by the client to the server.
 // It sends a formulated MTU size from the server preferred MTU size sent by the server in the OpenConnectionReply1 message.
 type OpenConnectionRequest2 struct {
 	// The address used by the client to connect to the server
