@@ -90,13 +90,26 @@ func (l *Listener) LocalAddr() *net.UDPAddr {
 // Starts the read loop that continuously reads any datagrams from the udp socket.
 func (l *Listener) startReadLoop(ch chan Wrapper) {
 	for {
-		_, addr, err := l.socket.ReadFromUDP(l.reader.Slice())
+		l.reader.Reset()
+
+		len, addr, err := l.socket.ReadFromUDP(l.reader.Slice())
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 
-		if _, ok := l.connections[addr.String()]; ok {
+		l.reader.Resize(len)
+
+		t := time.Now()
+		if conn, ok := l.connections[addr.String()]; ok {
+
+			if err := conn.readDatagram(l.reader); err != nil {
+				fmt.Printf("Error: %v\n", err)
+			}
+
+			dur := time.Since(t).Nanoseconds()
+			fmt.Printf("Time taken: %d nsecs\n", dur)
+
 			continue
 		}
 
@@ -104,8 +117,6 @@ func (l *Listener) startReadLoop(ch chan Wrapper) {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
-
-		l.reader.Reset()
 	}
 }
 
@@ -136,6 +147,8 @@ func (l *Listener) handle(addr *net.UDPAddr, ch chan Wrapper) error {
 		return err
 	}
 
+	fmt.Printf("ID: %d\n", id)
+
 	switch id {
 	case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
 		return l.handleUnconnectedPing(addr, ch)
@@ -144,7 +157,7 @@ func (l *Listener) handle(addr *net.UDPAddr, ch chan Wrapper) error {
 	case message.IDOpenConnectionRequest2:
 		return l.handleOpenConnectionRequest2(addr, ch)
 	default:
-		fmt.Printf("Listener: %v\n", err)
+		fmt.Printf("Unhandled Unconnected ID: %d\n", id)
 		return nil
 	}
 }

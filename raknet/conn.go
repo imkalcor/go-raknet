@@ -1,6 +1,7 @@
 package raknet
 
 import (
+	"fmt"
 	"net"
 	"time"
 
@@ -21,6 +22,7 @@ type Connection struct {
 
 	sequenceWindow *protocol.SequenceWindow
 	messageWindow  *protocol.MessageWindow
+	recoveryWindow *protocol.RecoveryWindow
 	splitWindow    map[uint16]*protocol.SplitWindow
 
 	ping         time.Duration
@@ -39,6 +41,7 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		mtu:            mtu,
 		sequenceWindow: protocol.CreateSequenceWindow(),
 		messageWindow:  protocol.CreateMessageWindow(),
+		recoveryWindow: protocol.CreateRecoveryWindow(),
 		splitWindow:    map[uint16]*protocol.SplitWindow{},
 		ping:           0,
 		latency:        0,
@@ -97,24 +100,38 @@ func (c *Connection) readDatagram(reader *buffer.Buffer) error {
 	return c.readFrame(reader)
 }
 
+// Reads an ack receipt destined from the connection's peer address.
 func (c *Connection) readAck(reader *buffer.Buffer) error {
 	if err := c.readReceipts(reader); err != nil {
 		return err
 	}
 
+	for _, seq := range c.receipts {
+		c.recoveryWindow.Acknowledge(seq)
+	}
+
+	fmt.Printf("ACKs: %v\n", c.receipts)
 	clear(c.receipts)
 	return nil
 }
 
+// Reads an nack receipt destined from the connection's peer address.
 func (c *Connection) readNack(reader *buffer.Buffer) error {
 	if err := c.readReceipts(reader); err != nil {
 		return err
 	}
 
+	for _, seq := range c.receipts {
+		c.recoveryWindow.Retransmit(seq)
+	}
+
+	fmt.Printf("NACKs: %v\n", c.receipts)
 	clear(c.receipts)
 	return nil
 }
 
+// Reads an ack or nack receipt from the buffer and returns an error if the operation
+// has failed.
 func (c *Connection) readReceipts(reader *buffer.Buffer) error {
 	recordsCount, err := reader.ReadInt16(byteorder.BigEndian)
 	if err != nil {
@@ -157,6 +174,8 @@ func (c *Connection) readReceipts(reader *buffer.Buffer) error {
 	return nil
 }
 
+// Reads a raknet frame message from the buffer and returns an error if the operation
+// has failed.
 func (c *Connection) readFrame(reader *buffer.Buffer) error {
 	seq, err := reader.ReadUint24(byteorder.LittleEndian)
 	if err != nil {
@@ -183,8 +202,7 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 			return err
 		}
 
-		length >>= 3
-		if length == 0 {
+		if length >>= 3; length == 0 {
 			return ILN_ERROR
 		}
 
@@ -198,11 +216,28 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 		}
 
 		if reliability.Sequenced() {
-			reader.Shift(3) // sequence window; we don't care about this
+			// sequence index (uint24)
+			reader.Shift(3)
 		}
 
 		if reliability.SequencedOrdered() {
-			reader.Shift(4) // order index & order channel; we don't care about this either
+			// order index (uint24)
+			// order channel (uint8)
+			reader.Shift(3 + 1)
+		}
+
+		if !c.messageWindow.Receive(messageIndex) {
+			shift := int(length)
+
+			if split {
+				// split count (int32)
+				// split ID (int16)
+				// split index (int32)
+				shift += protocol.FRAME_ADDITIONAL_SIZE
+			}
+
+			reader.Shift(shift)
+			continue
 		}
 
 		var splitCount uint32
@@ -226,10 +261,6 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 			}
 		}
 
-		if !c.messageWindow.Receive(messageIndex) {
-			continue
-		}
-
 		content := make([]byte, length)
 		if err := reader.Read(content); err != nil {
 			return err
@@ -245,21 +276,34 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 				splits = protocol.CreateSplitWindow(splitCount)
 			}
 
-			if splits.Receive(splitIndex, content) {
-				c.readMessage()
+			if c := splits.Receive(splitIndex, content); c != nil {
+				content = c
 			}
 
 			c.splitWindow[splitID] = splits
-		} else {
-			c.readMessage()
+		}
+
+		if err := c.readMessage(content); err != nil {
+			return err
 		}
 
 		count += 1
-
 		if count > protocol.MAX_FRAME_COUNT {
 			return MFC_ERROR
 		}
 	}
 
+	return nil
+}
+
+func (c *Connection) readMessage(buf []byte) error {
+	reader := buffer.From(buf)
+
+	_, err := reader.ReadUint8()
+	if err != nil {
+		return err
+	}
+
+	//fmt.Printf("ID: %d\n", id)
 	return nil
 }
