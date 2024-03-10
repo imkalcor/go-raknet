@@ -11,10 +11,10 @@ import (
 	"github.com/gamevidea/raknet/internal/protocol"
 )
 
-// Wrapper carries the information about an outgoing raknet message such as the destination
+// MessageWrapper carries the information about an outgoing raknet message such as the destination
 // and the message itself. It is sent through a channel to the write loop that runs on a separate
 // thread.
-type Wrapper struct {
+type MessageWrapper struct {
 	dest net.UDPAddr
 	msg  message.Message
 }
@@ -42,6 +42,8 @@ type Listener struct {
 
 	reader *buffer.Buffer
 	writer *buffer.Buffer
+
+	ch chan *Connection
 }
 
 // Listen announces on the local network address. Creates a new Raknet Listener and binds the listener
@@ -69,7 +71,7 @@ func Listen(addr string) (*Listener, error) {
 		writer:            buffer.New(protocol.MAX_MTU_SIZE),
 	}
 
-	ch := make(chan Wrapper)
+	ch := make(chan MessageWrapper)
 
 	go listener.startReadLoop(ch)
 	go listener.startWriteLoop(ch)
@@ -87,8 +89,13 @@ func (l *Listener) LocalAddr() *net.UDPAddr {
 	return l.addr
 }
 
+// Waits for a new connection to be accepted
+func (l *Listener) Accept() *Connection {
+	return <-l.ch
+}
+
 // Starts the read loop that continuously reads any datagrams from the udp socket.
-func (l *Listener) startReadLoop(ch chan Wrapper) {
+func (l *Listener) startReadLoop(ch chan MessageWrapper) {
 	for {
 		l.reader.Reset()
 
@@ -121,7 +128,7 @@ func (l *Listener) startReadLoop(ch chan Wrapper) {
 }
 
 // Starts the write loop that flushes the outgoing datagrams to the udp socket
-func (l *Listener) startWriteLoop(ch chan Wrapper) {
+func (l *Listener) startWriteLoop(ch chan MessageWrapper) {
 	for {
 		info := <-ch
 
@@ -141,7 +148,7 @@ func (l *Listener) startWriteLoop(ch chan Wrapper) {
 
 // Handle is called when an incoming unconnected message is received on the socket. It handles the message
 // by flushing the response for the message immediately.
-func (l *Listener) handle(addr *net.UDPAddr, ch chan Wrapper) error {
+func (l *Listener) handle(addr *net.UDPAddr, ch chan MessageWrapper) error {
 	id, err := l.reader.ReadUint8()
 	if err != nil {
 		return err
@@ -163,7 +170,7 @@ func (l *Listener) handle(addr *net.UDPAddr, ch chan Wrapper) error {
 }
 
 // Handles an incoming unconnected ping message
-func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, ch chan MessageWrapper) (err error) {
 	msg := message.UnconnectedPing{}
 	if err = msg.Read(l.reader); err != nil {
 		return
@@ -175,7 +182,7 @@ func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, ch chan Wrapper) (er
 		Data:          []byte("MCPE;Dedicated Server;390;1.14.60;0;10;13253860892328930865;Bedrock level;Survival;1;19132;19133;"),
 	}
 
-	ch <- Wrapper{
+	ch <- MessageWrapper{
 		dest: *addr,
 		msg:  &resp,
 	}
@@ -184,7 +191,7 @@ func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr, ch chan Wrapper) (er
 }
 
 // Handles an open connection request 1 message
-func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan MessageWrapper) (err error) {
 	msg := message.OpenConnectionRequest1{}
 	if err = msg.Read(l.reader); err != nil {
 		return
@@ -196,7 +203,7 @@ func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan Wrapp
 			ServerGUID:     l.guid,
 		}
 
-		ch <- Wrapper{
+		ch <- MessageWrapper{
 			dest: *addr,
 			msg:  &resp,
 		}
@@ -214,7 +221,7 @@ func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan Wrapp
 		ServerPreferredMTUSize: uint16(mtu),
 	}
 
-	ch <- Wrapper{
+	ch <- MessageWrapper{
 		dest: *addr,
 		msg:  &resp,
 	}
@@ -223,7 +230,7 @@ func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr, ch chan Wrapp
 }
 
 // Handles an open connection request 2 message
-func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, ch chan Wrapper) (err error) {
+func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, ch chan MessageWrapper) (err error) {
 	msg := message.OpenConnectionRequest2{}
 	if err = msg.Read(l.reader); err != nil {
 		return
@@ -241,11 +248,14 @@ func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr, ch chan Wrapp
 		Secure:        false,
 	}
 
-	ch <- Wrapper{
+	ch <- MessageWrapper{
 		dest: *addr,
 		msg:  &resp,
 	}
 
-	l.connections[addr.String()] = newConn(l.addr, addr, l.socket, mtu)
+	conn := newConn(l.addr, addr, l.socket, mtu)
+	go conn.check(l.ch)
+
+	l.connections[addr.String()] = conn
 	return
 }

@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // This is the Raknet Protocol Version supported by this library
 const PROTOCOL_VERSION byte = 11
 
@@ -64,3 +66,10 @@ const MAX_FRAME_COUNT int = 250
 
 // This is the number of maximum fragments that a raknet message can have
 const MAX_FRAGMENT_COUNT uint32 = 250
+
+// This is the maximum size of a raknet message. Raknet messages cannot exceed this size.
+const MAX_MESSAGE_SIZE int = 8000
+
+// TPS is the ticks per second at which various raknet logic such as ACKs, NACKs, and state updates
+// are performed.
+const TPS time.Duration = time.Second * 100

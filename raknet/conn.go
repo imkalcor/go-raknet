@@ -11,6 +11,14 @@ import (
 	"github.com/gamevidea/raknet/internal/protocol"
 )
 
+type State = uint8
+
+const (
+	Connecting State = iota
+	Connected
+	Disconnected
+)
+
 // Connection is an established raknet connection stream that handles the reliable encoding and decoding
 // of messages, receipts to and from the other end of the connection.
 type Connection struct {
@@ -30,6 +38,16 @@ type Connection struct {
 	lastActivity time.Time
 
 	receipts []uint32
+	state    State
+
+	sequenceNumber uint32
+	messageIndex   uint32
+	sequenceIndex  uint32
+	orderIndex     uint32
+	splitID        uint16
+
+	msgbuf *buffer.Buffer
+	buffer *buffer.Buffer
 }
 
 // Creates and returns a new Raknet Connection
@@ -47,8 +65,12 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		latency:        0,
 		lastActivity:   time.Now(),
 		receipts:       make([]uint32, 0, protocol.MAX_RECEIPTS),
+		state:          Connecting,
+		msgbuf:         buffer.New(protocol.MAX_MESSAGE_SIZE),
+		buffer:         buffer.New(protocol.MAX_MTU_SIZE),
 	}
 
+	go conn.startWriteLoop()
 	return conn
 }
 
@@ -70,6 +92,29 @@ func (c *Connection) Ping() time.Duration {
 // Returns the latency of the connection
 func (c *Connection) Latency() time.Duration {
 	return c.latency
+}
+
+// Returns the connection state of the connection
+func (c *Connection) State() State {
+	return c.state
+}
+
+// Checks the connection's state and sends it over to the channel provided once it is ready so that
+// it can be retrieved from the Listener upon calling Accept() function.
+func (c *Connection) check(ch chan *Connection) {
+	deadline := time.NewTimer(5 * time.Second)
+
+	for {
+		select {
+		case <-deadline.C:
+			return
+		case <-time.After(protocol.TPS):
+			if c.state == Connected {
+				ch <- c
+				return
+			}
+		}
+	}
 }
 
 // Reads an incoming datagram on the socket destined from the connection's peer address.
@@ -216,23 +261,17 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 		}
 
 		if reliability.Sequenced() {
-			// sequence index (uint24)
 			reader.Shift(3)
 		}
 
 		if reliability.SequencedOrdered() {
-			// order index (uint24)
-			// order channel (uint8)
 			reader.Shift(3 + 1)
 		}
 
-		if !c.messageWindow.Receive(messageIndex) {
+		if reliability.Reliable() && !c.messageWindow.Receive(messageIndex) {
 			shift := int(length)
 
 			if split {
-				// split count (int32)
-				// split ID (int16)
-				// split index (int32)
 				shift += protocol.FRAME_ADDITIONAL_SIZE
 			}
 
@@ -296,14 +335,206 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 	return nil
 }
 
+// Reads a raknet message and returns an error if the operation has failed
 func (c *Connection) readMessage(buf []byte) error {
 	reader := buffer.From(buf)
 
-	_, err := reader.ReadUint8()
+	id, err := reader.ReadUint8()
 	if err != nil {
 		return err
 	}
 
 	//fmt.Printf("ID: %d\n", id)
+
+	switch id {
+	case message.IDConnectedPing:
+		return c.handleConnectedPing(reader)
+	case message.IDConnectionRequest:
+		return c.handleConnectionRequest(reader)
+	case message.IDNewIncomingConnection:
+		return c.handleNewIncomingConnection(reader)
+	}
+	return nil
+}
+
+// Handles an incoming connected ping from the peer and returns an error if the operation has failed
+func (c *Connection) handleConnectedPing(reader *buffer.Buffer) error {
+	msg := message.ConnectedPing{}
+	if err := msg.Read(reader); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Handles an incoming connection request from the peer and returns an error if the operation has failed
+func (c *Connection) handleConnectionRequest(reader *buffer.Buffer) error {
+	msg := message.ConnectionRequest{}
+	if err := msg.Read(reader); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Handles an incoming connection from the peer and returns an error if the operation has failed
+func (c *Connection) handleNewIncomingConnection(reader *buffer.Buffer) error {
+	msg := message.NewIncomingConnection{}
+	if err := msg.Read(reader); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Starts a write loop that runs periodically every configured Raknet TPS that flushes the
+// packet batch we have written so far.
+func (c *Connection) startWriteLoop() {
+	for {
+		select {
+		case <-time.After(protocol.TPS):
+			if c.buffer.Offset() == 0 {
+				continue
+			}
+
+			c.flush()
+		}
+	}
+}
+
+// Writes a message to the raknet connection with the specified reliability and returns an error if the
+// operation has failed
+func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reliability) error {
+	if err := msg.Write(c.msgbuf); err != nil {
+		return err
+	}
+
+	fragments := c.split(c.msgbuf.Slice())
+	orderIndex := c.orderIndex
+	c.orderIndex += 1
+
+	splitCount := len(fragments)
+	splitID := c.splitID
+	split := splitCount > 1
+
+	if split {
+		c.splitID += 1
+	}
+
+	for splitIndex := 0; splitIndex < splitCount; splitIndex++ {
+		content := fragments[uint8(splitIndex)]
+		max_size := c.buffer.Remaining() - protocol.FRAME_BODY_SIZE
+
+		if len(content) > max_size {
+			c.flush()
+		}
+
+		header := byte(reliability) << 5
+		if split {
+			header |= protocol.FLAG_FRAGMENTED
+		}
+
+		if err := c.buffer.WriteUint8(header); err != nil {
+			return err
+		}
+
+		if err := c.buffer.WriteUint16(uint16(len(content))<<3, byteorder.BigEndian); err != nil {
+			return err
+		}
+
+		if reliability.Reliable() {
+			if err := c.buffer.WriteUint24(c.messageIndex, byteorder.LittleEndian); err != nil {
+				return err
+			}
+			c.messageIndex += 1
+		}
+
+		if reliability.Sequenced() {
+			if err := c.buffer.WriteUint24(c.sequenceIndex, byteorder.LittleEndian); err != nil {
+				return err
+			}
+			c.sequenceIndex += 1
+		}
+
+		if reliability.SequencedOrdered() {
+			if err := c.buffer.WriteUint24(orderIndex, byteorder.LittleEndian); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint8(0); err != nil {
+				return err
+			}
+		}
+
+		if split {
+			if err := c.buffer.WriteUint32(uint32(splitCount), byteorder.BigEndian); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint16(splitID, byteorder.BigEndian); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint32(uint32(splitIndex), byteorder.BigEndian); err != nil {
+				return err
+			}
+		}
+
+		if err := c.buffer.Write(content); err != nil {
+			return err
+		}
+
+		if reliability != protocol.ReliableOrdered {
+			c.flush()
+		}
+	}
+
+	c.msgbuf.Reset()
+	return nil
+}
+
+// Splits the provided message slice into smaller fragments if it exceeds the maximum configured MTU size.
+func (c *Connection) split(buf []byte) map[uint8][]byte {
+	max_mtu := c.mtu - protocol.UDP_HEADER_SIZE - protocol.FRAME_HEADER_SIZE - protocol.FRAME_BODY_SIZE
+	len := len(buf)
+
+	if len > max_mtu {
+		max_mtu -= protocol.FRAME_ADDITIONAL_SIZE
+	}
+
+	count := len / max_mtu
+	if len%max_mtu != 0 {
+		count += 1
+	}
+
+	fragments := make(map[uint8][]byte, count)
+	for i := 0; i < count; i++ {
+		start := i * max_mtu
+		end := start + max_mtu
+
+		if end > len {
+			end = len
+		}
+
+		fragments[uint8(i)] = buf[start:end]
+	}
+
+	return fragments
+}
+
+// Flushes the batch of datagrams we have written so far and returns an error if the operation has failed
+func (c *Connection) flush() error {
+	bytes := make([]byte, c.buffer.Offset())
+	copy(bytes, c.buffer.Bytes())
+
+	c.recoveryWindow.Add(c.sequenceNumber, bytes)
+
+	if _, err := c.socket.WriteTo(c.buffer.Bytes(), c.peerAddr); err != nil {
+		return err
+	}
+
+	c.sequenceNumber += 1
+	c.buffer.Reset()
+
 	return nil
 }
