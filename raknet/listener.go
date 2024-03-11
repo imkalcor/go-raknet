@@ -107,15 +107,9 @@ func (l *Listener) startReadLoop(ch chan MessageWrapper) {
 
 		l.reader.Resize(len)
 
-		t := time.Now()
 		if conn, ok := l.connections[addr.String()]; ok {
-
-			if err := conn.readDatagram(l.reader); err != nil {
-				fmt.Printf("Error: %v\n", err)
-			}
-
-			dur := time.Since(t).Nanoseconds()
-			fmt.Printf("Time taken: %d nsecs\n", dur)
+			copy(conn.reader.Slice()[:len], l.reader.Get(-1))
+			conn.recv(len)
 
 			continue
 		}
@@ -137,7 +131,7 @@ func (l *Listener) startWriteLoop(ch chan MessageWrapper) {
 			continue
 		}
 
-		if _, err := l.socket.WriteTo(l.writer.Bytes(), &info.dest); err != nil {
+		if _, err := l.socket.WriteTo(l.writer.Get(-1), &info.dest); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
