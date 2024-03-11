@@ -136,7 +136,8 @@ func CreateSplitWindow(count uint32) *SplitWindow {
 	}
 }
 
-// Tries to receive a fragment. Returns true if all the fragments for the message has been received.
+// Tries to receive a fragment. Returns nil if one or more fragments are still missing or returns
+// the combined slice
 func (w *SplitWindow) Receive(index uint32, fragment []byte) []byte {
 	w.Fragments[index] = fragment
 
@@ -144,11 +145,6 @@ func (w *SplitWindow) Receive(index uint32, fragment []byte) []byte {
 		return nil
 	}
 
-	return w.assemble()
-}
-
-// Assembles all the fragments together and returns a combined frame data
-func (w *SplitWindow) assemble() []byte {
 	length := 0
 	for _, f := range w.Fragments {
 		length += len(f)

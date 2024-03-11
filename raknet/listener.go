@@ -17,6 +17,7 @@ import (
 type MessageWrapper struct {
 	dest net.UDPAddr
 	msg  message.Message
+	rlb  protocol.Reliability
 }
 
 // DatagramMetrics help in keeping record of the number of datagrams that we receive from a connection in a second
@@ -101,21 +102,22 @@ func (l *Listener) startReadLoop(ch chan MessageWrapper) {
 
 		len, addr, err := l.socket.ReadFromUDP(l.reader.Slice())
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf("Socket Read: %v\n", err)
 			continue
 		}
 
 		l.reader.Resize(len)
 
 		if conn, ok := l.connections[addr.String()]; ok {
-			copy(conn.reader.Slice()[:len], l.reader.Get(-1))
-			conn.recv(len)
+			if err := conn.readDatagram(l.reader); err != nil {
+				fmt.Printf("Conn Handle: %v\n", err)
+			}
 
 			continue
 		}
 
 		if err := l.handle(addr, ch); err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf("Listener Handle: %v\n", err)
 			continue
 		}
 	}
@@ -124,15 +126,15 @@ func (l *Listener) startReadLoop(ch chan MessageWrapper) {
 // Starts the write loop that flushes the outgoing datagrams to the udp socket
 func (l *Listener) startWriteLoop(ch chan MessageWrapper) {
 	for {
-		info := <-ch
+		wrapper := <-ch
 
-		if err := info.msg.Write(l.writer); err != nil {
-			fmt.Printf("Error: %v\n", err)
+		if err := wrapper.msg.Write(l.writer); err != nil {
+			fmt.Printf("Listener Write: %v\n", err)
 			continue
 		}
 
-		if _, err := l.socket.WriteTo(l.writer.Get(-1), &info.dest); err != nil {
-			fmt.Printf("Error: %v\n", err)
+		if _, err := l.socket.WriteTo(l.writer.Bytes(), &wrapper.dest); err != nil {
+			fmt.Printf("Socket Write: %v\n", err)
 			continue
 		}
 
