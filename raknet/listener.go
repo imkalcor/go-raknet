@@ -46,7 +46,7 @@ type Listener struct {
 	connections map[string]*Connection
 	blocked     map[string]time.Time
 
-	datagramMetrics   map[string]*DatagramMetrics
+	datagramMetrics   map[string]DatagramMetrics
 	datagramIntegrity map[string]byte
 
 	conn chan *Connection
@@ -75,7 +75,7 @@ func Listen(addr string) (*Listener, error) {
 		guid:              rand.Int63(),
 		connections:       map[string]*Connection{},
 		blocked:           map[string]time.Time{},
-		datagramMetrics:   map[string]*DatagramMetrics{},
+		datagramMetrics:   map[string]DatagramMetrics{},
 		datagramIntegrity: map[string]byte{},
 		conn:              make(chan *Connection),
 		send:              make(chan unconnectedMessage),
@@ -261,7 +261,7 @@ func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr) (err error) {
 	}
 
 	conn := newConn(l.addr, addr, l.socket, mtu)
-	go conn.check(l.conn)
+	go conn.checkState(l.conn)
 
 	l.connections[addr.String()] = conn
 	return

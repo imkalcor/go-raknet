@@ -37,10 +37,10 @@ type Connection struct {
 	socket *net.UDPConn
 	mtu    int
 
-	sequenceWindow *protocol.SequenceWindow
-	messageWindow  *protocol.MessageWindow
-	recoveryWindow *protocol.RecoveryWindow
-	splitWindow    map[uint16]*protocol.SplitWindow
+	sequenceWindow protocol.SequenceWindow
+	messageWindow  protocol.MessageWindow
+	recoveryWindow protocol.RecoveryWindow
+	splitWindow    map[uint16]protocol.SplitWindow
 
 	ping         time.Duration
 	latency      time.Duration
@@ -73,7 +73,7 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		sequenceWindow: protocol.CreateSequenceWindow(),
 		messageWindow:  protocol.CreateMessageWindow(),
 		recoveryWindow: protocol.CreateRecoveryWindow(),
-		splitWindow:    map[uint16]*protocol.SplitWindow{},
+		splitWindow:    map[uint16]protocol.SplitWindow{},
 		ping:           0,
 		latency:        0,
 		lastActivity:   time.Now(),
@@ -123,7 +123,7 @@ func (c *Connection) Disconnect() {
 
 // Checks the connection's state and sends it over to the channel provided once it is ready so that
 // it can be retrieved from the Listener upon calling Accept() function.
-func (c *Connection) check(ch chan *Connection) {
+func (c *Connection) checkState(ch chan *Connection) {
 	deadline := time.NewTimer(5 * time.Second)
 
 	for {

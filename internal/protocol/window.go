@@ -17,8 +17,8 @@ type SequenceWindow struct {
 }
 
 // Creates and returns a new Sequence Window
-func CreateSequenceWindow() *SequenceWindow {
-	return &SequenceWindow{
+func CreateSequenceWindow() SequenceWindow {
+	return SequenceWindow{
 		Start:   0,
 		End:     WINDOW_SIZE,
 		Highest: 0,
@@ -89,8 +89,8 @@ type MessageWindow struct {
 }
 
 // Creates and returns a new message window
-func CreateMessageWindow() *MessageWindow {
-	return &MessageWindow{
+func CreateMessageWindow() MessageWindow {
+	return MessageWindow{
 		Start:   0,
 		End:     WINDOW_SIZE,
 		Indexes: make(map[uint32]struct{}, WINDOW_SIZE),
@@ -129,8 +129,8 @@ type SplitWindow struct {
 }
 
 // Creates and returns a new split window with the specified capacity
-func CreateSplitWindow(count uint32) *SplitWindow {
-	return &SplitWindow{
+func CreateSplitWindow(count uint32) SplitWindow {
+	return SplitWindow{
 		Count:     count,
 		Fragments: map[uint32][]byte{},
 	}
@@ -176,8 +176,8 @@ type RecoveryWindow struct {
 }
 
 // Creates and returns a new recovery window
-func CreateRecoveryWindow() *RecoveryWindow {
-	return &RecoveryWindow{
+func CreateRecoveryWindow() RecoveryWindow {
+	return RecoveryWindow{
 		unacknowledged: map[uint32]*Record{},
 		delays:         map[time.Time]time.Duration{},
 	}
