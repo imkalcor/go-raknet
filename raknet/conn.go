@@ -20,6 +20,14 @@ const (
 	Disconnected
 )
 
+// connectedMessage represents an outgoing messaged destined for the connection's peer address. It
+// contains the actual message that need to be dispatched with the reliability that it should be sent
+// as.
+type connectedMessage struct {
+	msg message.Message
+	rlb protocol.Reliability
+}
+
 // Connection is an established raknet connection stream that handles the reliable encoding and decoding
 // of messages, receipts to and from the other end of the connection.
 type Connection struct {
@@ -48,11 +56,11 @@ type Connection struct {
 	orderIndex     uint32
 	splitID        uint16
 
-	writer *buffer.Buffer
-	msgbuf *buffer.Buffer
+	batch  buffer.Buffer
+	msgbuf buffer.Buffer
 
 	dc   chan struct{}
-	send chan MessageWrapper
+	send chan connectedMessage
 }
 
 // Creates and returns a new Raknet Connection
@@ -72,13 +80,13 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		lastFlushed:    time.Now(),
 		receipts:       make([]uint32, 0, protocol.MAX_RECEIPTS),
 		state:          Connecting,
-		writer:         buffer.New(protocol.MAX_MTU_SIZE),
+		batch:          buffer.New(protocol.MAX_MTU_SIZE),
 		msgbuf:         buffer.New(protocol.MAX_MESSAGE_SIZE),
 		dc:             make(chan struct{}),
-		send:           make(chan MessageWrapper),
+		send:           make(chan connectedMessage),
 	}
 
-	go conn.startWriteLoop()
+	go conn.handler()
 	return conn
 }
 
@@ -134,8 +142,8 @@ func (c *Connection) check(ch chan *Connection) {
 }
 
 // Reads an incoming datagram on the socket destined from the connection's peer address.
-func (c *Connection) readDatagram(reader *buffer.Buffer) error {
-	header, err := reader.ReadUint8()
+func (c *Connection) readDatagram(b buffer.Buffer) error {
+	header, err := b.ReadUint8()
 	if err != nil {
 		return err
 	}
@@ -151,19 +159,19 @@ func (c *Connection) readDatagram(reader *buffer.Buffer) error {
 	c.lastActivity = time.Now()
 
 	if header&protocol.FLAG_ACK != 0 {
-		return c.readAck(reader)
+		return c.readAck(b)
 	}
 
 	if header&protocol.FLAG_NACK != 0 {
-		return c.readNack(reader)
+		return c.readNack(b)
 	}
 
-	return c.readFrame(reader)
+	return c.readFrame(b)
 }
 
 // Reads an ack receipt destined from the connection's peer address.
-func (c *Connection) readAck(reader *buffer.Buffer) error {
-	if err := c.readReceipts(reader); err != nil {
+func (c *Connection) readAck(b buffer.Buffer) error {
+	if err := c.readReceipts(b); err != nil {
 		return err
 	}
 
@@ -177,8 +185,8 @@ func (c *Connection) readAck(reader *buffer.Buffer) error {
 }
 
 // Reads an nack receipt destined from the connection's peer address.
-func (c *Connection) readNack(reader *buffer.Buffer) error {
-	if err := c.readReceipts(reader); err != nil {
+func (c *Connection) readNack(b buffer.Buffer) error {
+	if err := c.readReceipts(b); err != nil {
 		return err
 	}
 
@@ -193,26 +201,26 @@ func (c *Connection) readNack(reader *buffer.Buffer) error {
 
 // Reads an ack or nack receipt from the buffer and returns an error if the operation
 // has failed.
-func (c *Connection) readReceipts(reader *buffer.Buffer) error {
-	recordsCount, err := reader.ReadInt16(byteorder.BigEndian)
+func (c *Connection) readReceipts(b buffer.Buffer) error {
+	recordsCount, err := b.ReadInt16(byteorder.BigEndian)
 	if err != nil {
 		return err
 	}
 
 	for i := 0; i < int(recordsCount); i++ {
-		recordType, err := reader.ReadUint8()
+		recordType, err := b.ReadUint8()
 		if err != nil {
 			return nil
 		}
 
 		switch recordType {
 		case protocol.RangedRecord:
-			start, err := reader.ReadUint24(byteorder.LittleEndian)
+			start, err := b.ReadUint24(byteorder.LittleEndian)
 			if err != nil {
 				return err
 			}
 
-			end, err := reader.ReadUint24(byteorder.LittleEndian)
+			end, err := b.ReadUint24(byteorder.LittleEndian)
 			if err != nil {
 				return err
 			}
@@ -221,7 +229,7 @@ func (c *Connection) readReceipts(reader *buffer.Buffer) error {
 				c.receipts = append(c.receipts, seq)
 			}
 		case protocol.SingleRecord:
-			seq, err := reader.ReadUint24(byteorder.LittleEndian)
+			seq, err := b.ReadUint24(byteorder.LittleEndian)
 			if err != nil {
 				return err
 			}
@@ -237,8 +245,8 @@ func (c *Connection) readReceipts(reader *buffer.Buffer) error {
 
 // Reads a raknet frame message from the buffer and returns an error if the operation
 // has failed.
-func (c *Connection) readFrame(reader *buffer.Buffer) error {
-	seq, err := reader.ReadUint24(byteorder.LittleEndian)
+func (c *Connection) readFrame(b buffer.Buffer) error {
+	seq, err := b.ReadUint24(byteorder.LittleEndian)
 	if err != nil {
 		return err
 	}
@@ -249,8 +257,8 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 
 	count := 0
 
-	for reader.Remaining() != 0 {
-		header, err := reader.ReadUint8()
+	for b.Remaining() != 0 {
+		header, err := b.ReadUint8()
 		if err != nil {
 			return err
 		}
@@ -258,7 +266,7 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 		split := (header & protocol.FLAG_FRAGMENTED) != 0
 		reliability := protocol.Reliability((header & 224) >> 5)
 
-		length, err := reader.ReadUint16(byteorder.BigEndian)
+		length, err := b.ReadUint16(byteorder.BigEndian)
 		if err != nil {
 			return err
 		}
@@ -270,18 +278,18 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 		var messageIndex uint32
 
 		if reliability.Reliable() {
-			messageIndex, err = reader.ReadUint24(byteorder.LittleEndian)
+			messageIndex, err = b.ReadUint24(byteorder.LittleEndian)
 			if err != nil {
 				return err
 			}
 		}
 
 		if reliability.Sequenced() {
-			reader.Shift(3)
+			b.Shift(3)
 		}
 
 		if reliability.SequencedOrdered() {
-			reader.Shift(3 + 1)
+			b.Shift(3 + 1)
 		}
 
 		if reliability.Reliable() && !c.messageWindow.Receive(messageIndex) {
@@ -291,7 +299,7 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 				shift += protocol.FRAME_ADDITIONAL_SIZE
 			}
 
-			reader.Shift(shift)
+			b.Shift(shift)
 			continue
 		}
 
@@ -300,24 +308,24 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 		var splitIndex uint32
 
 		if split {
-			splitCount, err = reader.ReadUint32(byteorder.BigEndian)
+			splitCount, err = b.ReadUint32(byteorder.BigEndian)
 			if err != nil {
 				return err
 			}
 
-			splitID, err = reader.ReadUint16(byteorder.BigEndian)
+			splitID, err = b.ReadUint16(byteorder.BigEndian)
 			if err != nil {
 				return err
 			}
 
-			splitIndex, err = reader.ReadUint32(byteorder.BigEndian)
+			splitIndex, err = b.ReadUint32(byteorder.BigEndian)
 			if err != nil {
 				return err
 			}
 		}
 
 		content := make([]byte, length)
-		if err := reader.Read(content); err != nil {
+		if err := b.Read(content); err != nil {
 			return err
 		}
 
@@ -353,9 +361,9 @@ func (c *Connection) readFrame(reader *buffer.Buffer) error {
 
 // Reads a raknet message and returns an error if the operation has failed
 func (c *Connection) readMessage(content []byte) error {
-	reader := buffer.From(content)
+	b := buffer.From(content)
 
-	id, err := reader.ReadUint8()
+	id, err := b.ReadUint8()
 	if err != nil {
 		return err
 	}
@@ -364,19 +372,19 @@ func (c *Connection) readMessage(content []byte) error {
 
 	switch id {
 	case message.IDConnectedPing:
-		return c.handleConnectedPing(reader)
+		return c.handleConnectedPing(b)
 	case message.IDConnectionRequest:
-		return c.handleConnectionRequest(reader)
+		return c.handleConnectionRequest(b)
 	case message.IDNewIncomingConnection:
-		return c.handleNewIncomingConnection(reader)
+		return c.handleNewIncomingConnection(b)
 	}
 	return nil
 }
 
 // Handles an incoming connected ping from the peer and returns an error if the operation has failed
-func (c *Connection) handleConnectedPing(reader *buffer.Buffer) error {
+func (c *Connection) handleConnectedPing(b buffer.Buffer) error {
 	msg := message.ConnectedPing{}
-	if err := msg.Read(reader); err != nil {
+	if err := msg.Read(b); err != nil {
 		return err
 	}
 
@@ -385,17 +393,18 @@ func (c *Connection) handleConnectedPing(reader *buffer.Buffer) error {
 		ServerTimestamp: msg.ClientTimestamp,
 	}
 
-	c.send <- MessageWrapper{
+	c.send <- connectedMessage{
 		msg: &resp,
 		rlb: protocol.Unreliable,
 	}
+
 	return nil
 }
 
 // Handles an incoming connection request from the peer and returns an error if the operation has failed
-func (c *Connection) handleConnectionRequest(reader *buffer.Buffer) error {
+func (c *Connection) handleConnectionRequest(b buffer.Buffer) error {
 	msg := message.ConnectionRequest{}
-	if err := msg.Read(reader); err != nil {
+	if err := msg.Read(b); err != nil {
 		return err
 	}
 
@@ -405,17 +414,18 @@ func (c *Connection) handleConnectionRequest(reader *buffer.Buffer) error {
 		AcceptedTimestamp: msg.RequestTimestamp,
 	}
 
-	c.send <- MessageWrapper{
+	c.send <- connectedMessage{
 		msg: &resp,
 		rlb: protocol.Unreliable,
 	}
+
 	return nil
 }
 
 // Handles an incoming connection from the peer and returns an error if the operation has failed
-func (c *Connection) handleNewIncomingConnection(reader *buffer.Buffer) error {
+func (c *Connection) handleNewIncomingConnection(b buffer.Buffer) error {
 	msg := message.NewIncomingConnection{}
-	if err := msg.Read(reader); err != nil {
+	if err := msg.Read(b); err != nil {
 		return err
 	}
 
@@ -423,28 +433,28 @@ func (c *Connection) handleNewIncomingConnection(reader *buffer.Buffer) error {
 	return nil
 }
 
-// Starts a write loop that runs periodically every configured Raknet TPS that flushes the
-// packet batch we have written so far.
-func (c *Connection) startWriteLoop() {
+// Starts the connection handler that flushes ACKs, NACKs, retransmits datagrams, and covers most of the
+// raknet connection logic every raknet TPS.
+func (c *Connection) handler() {
 	for {
 		select {
 		case <-c.dc:
 			return
-		case wrapper := <-c.send:
-			if err := c.writeMessage(wrapper.msg, wrapper.rlb); err != nil {
-				fmt.Printf("Conn Write: %v\n", err)
-				continue
-			}
-		default:
-			if time.Since(c.lastFlushed) < protocol.TPS {
-				continue
+		case <-time.After(protocol.TPS):
+			for i := 0; i < len(c.send); i++ {
+				send := <-c.send
+
+				if err := c.writeMessage(send.msg, send.rlb); err != nil {
+					fmt.Printf("Conn Write: %v\n", err)
+					continue
+				}
 			}
 
-			if c.writer.Offset() == 0 {
-				continue
+			if time.Since(c.lastFlushed) > protocol.TPS && c.batch.Offset() > 0 {
+				c.flush()
 			}
 
-			c.flush()
+			c.sequenceWindow.Shift()
 		}
 	}
 }
@@ -456,7 +466,7 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 		return err
 	}
 
-	fragments := c.split()
+	fragments := c.split(c.msgbuf.Bytes())
 	orderIndex := c.orderIndex
 	c.orderIndex += 1
 
@@ -470,7 +480,7 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 
 	for splitIndex := 0; splitIndex < splitCount; splitIndex++ {
 		content := fragments[uint8(splitIndex)]
-		max_size := c.writer.Remaining() - protocol.FRAME_BODY_SIZE
+		max_size := c.batch.Remaining() - protocol.FRAME_BODY_SIZE
 
 		if len(content) > max_size {
 			c.flush()
@@ -481,53 +491,53 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 			header |= protocol.FLAG_FRAGMENTED
 		}
 
-		if err := c.writer.WriteUint8(header); err != nil {
+		if err := c.batch.WriteUint8(header); err != nil {
 			return err
 		}
 
-		if err := c.writer.WriteUint16(uint16(len(content))<<3, byteorder.BigEndian); err != nil {
+		if err := c.batch.WriteUint16(uint16(len(content))<<3, byteorder.BigEndian); err != nil {
 			return err
 		}
 
 		if reliability.Reliable() {
-			if err := c.writer.WriteUint24(c.messageIndex, byteorder.LittleEndian); err != nil {
+			if err := c.batch.WriteUint24(c.messageIndex, byteorder.LittleEndian); err != nil {
 				return err
 			}
 			c.messageIndex += 1
 		}
 
 		if reliability.Sequenced() {
-			if err := c.writer.WriteUint24(c.sequenceIndex, byteorder.LittleEndian); err != nil {
+			if err := c.batch.WriteUint24(c.sequenceIndex, byteorder.LittleEndian); err != nil {
 				return err
 			}
 			c.sequenceIndex += 1
 		}
 
 		if reliability.SequencedOrdered() {
-			if err := c.writer.WriteUint24(orderIndex, byteorder.LittleEndian); err != nil {
+			if err := c.batch.WriteUint24(orderIndex, byteorder.LittleEndian); err != nil {
 				return err
 			}
 
-			if err := c.writer.WriteUint8(0); err != nil {
+			if err := c.batch.WriteUint8(0); err != nil {
 				return err
 			}
 		}
 
 		if split {
-			if err := c.writer.WriteUint32(uint32(splitCount), byteorder.BigEndian); err != nil {
+			if err := c.batch.WriteUint32(uint32(splitCount), byteorder.BigEndian); err != nil {
 				return err
 			}
 
-			if err := c.writer.WriteUint16(splitID, byteorder.BigEndian); err != nil {
+			if err := c.batch.WriteUint16(splitID, byteorder.BigEndian); err != nil {
 				return err
 			}
 
-			if err := c.writer.WriteUint32(uint32(splitIndex), byteorder.BigEndian); err != nil {
+			if err := c.batch.WriteUint32(uint32(splitIndex), byteorder.BigEndian); err != nil {
 				return err
 			}
 		}
 
-		if err := c.writer.Write(content); err != nil {
+		if err := c.batch.Write(content); err != nil {
 			return err
 		}
 
@@ -543,8 +553,7 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 // Splits the provided slice of bytes into smaller slices indexed by their order index if it exceeds the
 // mtu size of the connection. The sub slices if formed reference the data in the provided original slice
 // with 0 memory allocations.
-func (c *Connection) split() map[uint8][]byte {
-	slice := c.msgbuf.Bytes()
+func (c *Connection) split(slice []byte) map[uint8][]byte {
 	max_mtu := c.mtu - protocol.UDP_HEADER_SIZE - protocol.FRAME_HEADER_SIZE - protocol.FRAME_BODY_SIZE
 
 	len := len(slice)
@@ -577,28 +586,27 @@ func (c *Connection) split() map[uint8][]byte {
 // Flushes the current batch of datagram which is ready to be sent to the peer. Returns an error if the operation
 // has failed.
 func (c *Connection) flush() error {
-
 	// Reset the offset to 0 to write the header of the datagram such as it's flags
 	// and the sequence number which takes 4 bytes. Store the offset for later.
-	offset := c.writer.Offset()
-	c.writer.SetOffset(0)
+	offset := c.batch.Offset()
+	c.batch.SetOffset(0)
 
-	if err := c.writer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NEEDS_B_AND_AS); err != nil {
+	if err := c.batch.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NEEDS_B_AND_AS); err != nil {
 		return err
 	}
 
-	if err := c.writer.WriteUint24(c.sequenceNumber, byteorder.LittleEndian); err != nil {
+	if err := c.batch.WriteUint24(c.sequenceNumber, byteorder.LittleEndian); err != nil {
 		return err
 	}
 
 	// Reset the offset back to the one we stored earlier so we obtain correct slice
 	// upon invoking c.writer.Bytes()
-	c.writer.SetOffset(offset)
+	c.batch.SetOffset(offset)
 
 	// Create a new copy of the buffer without the header data to store it in the recovery map
 	// for retransmission of datagram with new sequence number.
 	bytes := make([]byte, offset-4)
-	copy(bytes, c.writer.Bytes()[4:])
+	copy(bytes, c.batch.Bytes()[4:])
 
 	// Add the serialized datagram into the recovery window without the header data so that
 	// new sequence number could be assigned to it upon retransmission.
@@ -609,14 +617,13 @@ func (c *Connection) flush() error {
 	 * Flush the datagram to the socket and reset the buffer's internal cursor buffer to start from
 	 * 4th index so that header can be prepended in the end upon flushing.
 	 */
-	if _, err := c.socket.WriteTo(c.writer.Bytes(), c.peerAddr); err != nil {
+	if _, err := c.socket.WriteTo(c.batch.Bytes(), c.peerAddr); err != nil {
 		return err
 	}
 
-	c.writer.Reset()
-	c.writer.SetOffset(4)
+	c.batch.Reset()
+	c.batch.SetOffset(4)
 
 	c.lastFlushed = time.Now()
-
 	return nil
 }

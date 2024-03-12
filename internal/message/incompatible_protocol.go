@@ -14,7 +14,7 @@ type IncompatibleProtocolVersion struct {
 
 // Reads an incompatible protocol version message from the buffer and returns an error if
 // the operation has failed
-func (pk *IncompatibleProtocolVersion) Read(buf *buffer.Buffer) (err error) {
+func (pk *IncompatibleProtocolVersion) Read(buf buffer.Buffer) (err error) {
 	if pk.ServerProtocol, err = buf.ReadUint8(); err != nil {
 		return
 	}
@@ -32,7 +32,7 @@ func (pk *IncompatibleProtocolVersion) Read(buf *buffer.Buffer) (err error) {
 
 // Writes an incompatible protocol version message to the buffer and returns an error if the operation
 // has failed
-func (pk *IncompatibleProtocolVersion) Write(buf *buffer.Buffer) (err error) {
+func (pk *IncompatibleProtocolVersion) Write(buf buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDIncompatibleProtocolVersion); err != nil {
 		return
 	}

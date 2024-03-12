@@ -20,11 +20,11 @@ type DatagramMetrics struct {
 	count     int
 }
 
-// unconnectedMessage represents an incoming message destined for the listener. It contains the address
-// of the source and the buffer in which the message is contained.
+// unconnectedMessage represents an outgoing message destined for a remote address. It contains the address
+// of the destination and the message to be dispatched.
 type unconnectedMessage struct {
-	addr   *net.UDPAddr
-	buffer *buffer.Buffer
+	addr *net.UDPAddr
+	msg  message.Message
 }
 
 // bufferPool is used for minimising the number of allocations and deallocations as it creates a pool of
@@ -50,7 +50,10 @@ type Listener struct {
 	datagramIntegrity map[string]byte
 
 	conn chan *Connection
-	incm chan unconnectedMessage
+	send chan unconnectedMessage
+
+	reader buffer.Buffer
+	writer buffer.Buffer
 }
 
 // Listen announces on the local network address. Creates a new Raknet Listener and binds the listener
@@ -75,11 +78,13 @@ func Listen(addr string) (*Listener, error) {
 		datagramMetrics:   map[string]*DatagramMetrics{},
 		datagramIntegrity: map[string]byte{},
 		conn:              make(chan *Connection),
-		incm:              make(chan unconnectedMessage),
+		send:              make(chan unconnectedMessage),
+		reader:            buffer.New(protocol.MAX_MTU_SIZE),
+		writer:            buffer.New(protocol.MAX_MTU_SIZE),
 	}
 
-	go listener.udpHandler()
-	go listener.listenerHandler()
+	go listener.udpReader()
+	go listener.udpWriter()
 
 	return listener, nil
 }
@@ -99,53 +104,59 @@ func (l *Listener) Accept() *Connection {
 	return <-l.conn
 }
 
-// Starts a new task that handles a datagram from the udp socket as soon as one is available.
-// It sends the datagram through a channel to either the Listener's handler or the connection's handler
-// depending upon the peer address it is destined from.
-func (l *Listener) udpHandler() {
+// Starts a udp reader task that tries to read any available datagram on the socket and handles it by dispatching
+// a response for it.
+func (l *Listener) udpReader() {
 	for {
-		buffer := bufferPool.Get().(*buffer.Buffer)
+		l.reader.Reset()
 
-		len, addr, err := l.socket.ReadFromUDP(buffer.Slice())
+		len, addr, err := l.socket.ReadFromUDP(l.reader.Slice())
 		if err != nil {
 			fmt.Printf("Socket Read: %v\n", err)
 			continue
 		}
 
-		buffer.Resize(len)
+		l.reader.Resize(len)
 
 		if conn, ok := l.connections[addr.String()]; ok {
-			if err := conn.readDatagram(buffer); err != nil {
+			if err := conn.readDatagram(l.reader); err != nil {
 				fmt.Printf("Conn Handle: %v\n", err)
 			}
 
 			continue
 		}
 
-		l.incm <- unconnectedMessage{
-			addr:   addr,
-			buffer: buffer,
-		}
-	}
-}
-
-// Starts a task that handles any datagrams destined for the Listener. These datagrams are
-// unconnected raknet messages which may be for pinging or for requesting connection.
-func (l *Listener) listenerHandler() {
-	for {
-		msg := <-l.incm
-
-		if err := l.handle(msg); err != nil {
+		if err := l.handle(addr); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 	}
 }
 
-// Handle is called when an incoming unconnected message is received on the socket. It handles the message
-// by flushing the response for the message immediately.
-func (l *Listener) handle(incm unconnectedMessage) error {
-	id, err := incm.buffer.ReadUint8()
+// Starts a new task that dispatches a message to the specified remote address when one is available
+// to be sent.
+func (l *Listener) udpWriter() {
+	for {
+		send := <-l.send
+
+		if err := send.msg.Write(l.writer); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		if _, err := l.socket.WriteTo(l.writer.Bytes(), send.addr); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		l.writer.Reset()
+	}
+}
+
+// handle is called when an incoming unconnected message is received on the socket. It handles the message
+// by flushing the response for that message immediately.
+func (l *Listener) handle(addr *net.UDPAddr) error {
+	id, err := l.reader.ReadUint8()
 	if err != nil {
 		return err
 	}
@@ -154,11 +165,11 @@ func (l *Listener) handle(incm unconnectedMessage) error {
 
 	switch id {
 	case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
-		return l.handleUnconnectedPing(incm)
+		return l.handleUnconnectedPing(addr)
 	case message.IDOpenConnectionRequest1:
-		return l.handleOpenConnectionRequest1(incm)
+		return l.handleOpenConnectionRequest1(addr)
 	case message.IDOpenConnectionRequest2:
-		return l.handleOpenConnectionRequest2(incm)
+		return l.handleOpenConnectionRequest2(addr)
 	default:
 		fmt.Printf("Unhandled Unconnected ID: %d\n", id)
 		return nil
@@ -166,13 +177,11 @@ func (l *Listener) handle(incm unconnectedMessage) error {
 }
 
 // Handles an incoming unconnected ping message
-func (l *Listener) handleUnconnectedPing(incm unconnectedMessage) (err error) {
+func (l *Listener) handleUnconnectedPing(addr *net.UDPAddr) (err error) {
 	msg := message.UnconnectedPing{}
-	if err = msg.Read(incm.buffer); err != nil {
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
-
-	incm.buffer.Reset()
 
 	resp := message.UnconnectedPong{
 		SendTimestamp: msg.SendTimestamp,
@@ -180,25 +189,20 @@ func (l *Listener) handleUnconnectedPing(incm unconnectedMessage) (err error) {
 		Data:          []byte("MCPE;Dedicated Server;390;1.14.60;0;10;13253860892328930865;Bedrock level;Survival;1;19132;19133;"),
 	}
 
-	if err = resp.Write(incm.buffer); err != nil {
-		return err
-	}
-
-	if _, err = l.socket.WriteTo(incm.buffer.Bytes(), incm.addr); err != nil {
-		return err
+	l.send <- unconnectedMessage{
+		addr: addr,
+		msg:  &resp,
 	}
 
 	return
 }
 
 // Handles an open connection request 1 message
-func (l *Listener) handleOpenConnectionRequest1(incm unconnectedMessage) (err error) {
+func (l *Listener) handleOpenConnectionRequest1(addr *net.UDPAddr) (err error) {
 	msg := message.OpenConnectionRequest1{}
-	if err = msg.Read(incm.buffer); err != nil {
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
-
-	incm.buffer.Reset()
 
 	if msg.Protocol != protocol.PROTOCOL_VERSION {
 		resp := message.IncompatibleProtocolVersion{
@@ -206,11 +210,10 @@ func (l *Listener) handleOpenConnectionRequest1(incm unconnectedMessage) (err er
 			ServerGUID:     l.guid,
 		}
 
-		if err = resp.Write(incm.buffer); err != nil {
-			return err
+		l.send <- unconnectedMessage{
+			addr: addr,
+			msg:  &resp,
 		}
-
-		_, err = l.socket.WriteTo(incm.buffer.Bytes(), incm.addr)
 		return
 	}
 
@@ -225,25 +228,20 @@ func (l *Listener) handleOpenConnectionRequest1(incm unconnectedMessage) (err er
 		ServerPreferredMTUSize: uint16(mtu),
 	}
 
-	if err = resp.Write(incm.buffer); err != nil {
-		return err
-	}
-
-	if _, err = l.socket.WriteTo(incm.buffer.Bytes(), incm.addr); err != nil {
-		return err
+	l.send <- unconnectedMessage{
+		addr: addr,
+		msg:  &resp,
 	}
 
 	return
 }
 
 // Handles an open connection request 2 message
-func (l *Listener) handleOpenConnectionRequest2(incm unconnectedMessage) (err error) {
+func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr) (err error) {
 	msg := message.OpenConnectionRequest2{}
-	if err = msg.Read(incm.buffer); err != nil {
+	if err = msg.Read(l.reader); err != nil {
 		return
 	}
-
-	incm.buffer.Reset()
 
 	mtu := int(msg.ClientPreferredMTUSize)
 	if mtu > protocol.MAX_MTU_SIZE || mtu < protocol.MIN_MTU_SIZE {
@@ -252,22 +250,19 @@ func (l *Listener) handleOpenConnectionRequest2(incm unconnectedMessage) (err er
 
 	resp := message.OpenConnectionReply2{
 		ServerGUID:    l.guid,
-		ClientAddress: *incm.addr,
+		ClientAddress: *addr,
 		MTUSize:       uint16(mtu),
 		Secure:        false,
 	}
 
-	if err = resp.Write(incm.buffer); err != nil {
-		return err
+	l.send <- unconnectedMessage{
+		addr: addr,
+		msg:  &resp,
 	}
 
-	if _, err = l.socket.WriteTo(incm.buffer.Bytes(), incm.addr); err != nil {
-		return err
-	}
-
-	conn := newConn(l.addr, incm.addr, l.socket, mtu)
+	conn := newConn(l.addr, addr, l.socket, mtu)
 	go conn.check(l.conn)
 
-	l.connections[incm.addr.String()] = conn
+	l.connections[addr.String()] = conn
 	return
 }

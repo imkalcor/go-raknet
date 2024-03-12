@@ -17,7 +17,7 @@ type ConnectionRequest struct {
 
 // Reads a connection request message from the buffer and returns an error if the operation
 // has failed
-func (pk *ConnectionRequest) Read(buf *buffer.Buffer) (err error) {
+func (pk *ConnectionRequest) Read(buf buffer.Buffer) (err error) {
 	if pk.ClientGUID, err = buf.ReadInt64(byteorder.BigEndian); err != nil {
 		return
 	}
@@ -35,7 +35,7 @@ func (pk *ConnectionRequest) Read(buf *buffer.Buffer) (err error) {
 
 // Writes a connection request message to the buffer and returns an error if the operation
 // has failed
-func (pk *ConnectionRequest) Write(buf *buffer.Buffer) (err error) {
+func (pk *ConnectionRequest) Write(buf buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDConnectionRequest); err != nil {
 		return
 	}
