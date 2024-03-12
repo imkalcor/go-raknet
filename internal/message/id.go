@@ -1,7 +1,5 @@
 package message
 
-import "github.com/gamevidea/binary/buffer"
-
 // ID represents a raknet message ID. It is a unique identifier for each RakNet
 // message.
 type ID = uint8
@@ -24,10 +22,3 @@ const (
 	IDDisconnectNotification         ID = 0x15
 	IDGamePacket                     ID = 0xfe
 )
-
-// Raknet Message is an interface implemented by all raknet messages that can be written and read
-// over a udp socket
-type Message interface {
-	Read(buf *buffer.Buffer) (err error)
-	Write(buf *buffer.Buffer) (err error)
-}
