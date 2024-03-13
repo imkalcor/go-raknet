@@ -116,7 +116,7 @@ func (l *Listener) udpReader() {
 			continue
 		}
 
-		fmt.Printf("Received %d bytes from %v\n", len, addr)
+		//fmt.Printf("Received %d bytes from %v\n", len, addr)
 		l.reader.Resize(len)
 
 		if conn, ok := l.connections[addr.String()]; ok {

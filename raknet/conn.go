@@ -48,7 +48,7 @@ type Connection struct {
 	lastActivity time.Time
 	lastFlushed  time.Time
 
-	receipts []uint32
+	receipts map[uint32]struct{}
 	state    State
 
 	sequenceNumber uint32
@@ -80,7 +80,7 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		latency:        0,
 		lastActivity:   time.Now(),
 		lastFlushed:    time.Now(),
-		receipts:       make([]uint32, 0, protocol.MAX_RECEIPTS),
+		receipts:       make(map[uint32]struct{}, protocol.MAX_RECEIPTS),
 		state:          Connecting,
 		sequenceNumber: 0,
 		messageIndex:   0,
@@ -94,7 +94,9 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		retr:           make(chan *buffer.Buffer, 250),
 	}
 
+	conn.batch.SetOffset(4)
 	go conn.handler()
+
 	return conn
 }
 
@@ -179,32 +181,38 @@ func (c *Connection) readDatagram(b *buffer.Buffer) error {
 
 // Reads an ack receipt destined from the connection's peer address.
 func (c *Connection) readAck(b *buffer.Buffer) error {
+	defer func() {
+		clear(c.receipts)
+	}()
+
 	if err := c.readReceipts(b); err != nil {
 		return err
 	}
 
-	for _, seq := range c.receipts {
+	for seq := range c.receipts {
 		c.recoveryWindow.Acknowledge(seq)
 	}
 
-	fmt.Printf("ACKs: %v\n", c.receipts)
-	clear(c.receipts)
+	//fmt.Printf("ACKs: %v\n", c.receipts)
 	return nil
 }
 
 // Reads an nack receipt destined from the connection's peer address.
 func (c *Connection) readNack(b *buffer.Buffer) error {
+	defer func() {
+		clear(c.receipts)
+	}()
+
 	if err := c.readReceipts(b); err != nil {
 		return err
 	}
 
-	for _, seq := range c.receipts {
+	for seq := range c.receipts {
 		b := c.recoveryWindow.Retransmit(seq)
 		c.retr <- buffer.From(b)
 	}
 
-	fmt.Printf("NACKs: %v\n", c.receipts)
-	clear(c.receipts)
+	//fmt.Printf("NACKs: %v\n", c.receipts)
 	return nil
 }
 
@@ -235,7 +243,7 @@ func (c *Connection) readReceipts(b *buffer.Buffer) error {
 			}
 
 			for seq := start; seq < end; seq++ {
-				c.receipts = append(c.receipts, seq)
+				c.receipts[seq] = struct{}{}
 			}
 		case protocol.SingleRecord:
 			seq, err := b.ReadUint24(byteorder.LittleEndian)
@@ -243,7 +251,7 @@ func (c *Connection) readReceipts(b *buffer.Buffer) error {
 				return err
 			}
 
-			c.receipts = append(c.receipts, seq)
+			c.receipts[seq] = struct{}{}
 		default:
 			return IRT_ERROR
 		}
@@ -280,8 +288,7 @@ func (c *Connection) readFrame(b *buffer.Buffer) error {
 			return err
 		}
 
-		length >>= 3
-		if length == 0 {
+		if length >>= 3; length == 0 {
 			return ILN_ERROR
 		}
 
@@ -382,6 +389,10 @@ func (c *Connection) readMessage(content []byte) error {
 		return c.handleConnectionRequest(b)
 	case message.IDNewIncomingConnection:
 		return c.handleNewIncomingConnection(b)
+	case message.IDDetectLostConnections:
+		return c.handleDetectLostConnections(b)
+	case message.IDDisconnectNotification:
+		c.dc <- struct{}{}
 	}
 	return nil
 }
@@ -400,7 +411,7 @@ func (c *Connection) handleConnectedPing(b *buffer.Buffer) error {
 
 	c.send <- connectedMessage{
 		msg: &resp,
-		rlb: protocol.Unreliable,
+		rlb: protocol.ReliableOrdered,
 	}
 
 	return nil
@@ -421,7 +432,7 @@ func (c *Connection) handleConnectionRequest(b *buffer.Buffer) error {
 
 	c.send <- connectedMessage{
 		msg: &resp,
-		rlb: protocol.Unreliable,
+		rlb: protocol.ReliableOrdered,
 	}
 
 	return nil
@@ -435,6 +446,17 @@ func (c *Connection) handleNewIncomingConnection(b *buffer.Buffer) error {
 	}
 
 	c.state = Connected
+	return nil
+}
+
+func (c *Connection) handleDetectLostConnections(b *buffer.Buffer) error {
+	msg := message.ConnectedPing{}
+
+	c.send <- connectedMessage{
+		msg: &msg,
+		rlb: protocol.ReliableOrdered,
+	}
+
 	return nil
 }
 
@@ -467,18 +489,6 @@ func (c *Connection) handler() {
 				buffer := <-c.retr
 
 				if err := c.flush(buffer, true); err != nil {
-					fmt.Printf("Retransmit: %v\n", err)
-					continue
-				}
-			}
-
-			/*
-			 * Gets all the datagrams that were lost during transmission and for which we did not
-			 * receive neither an ACK nor a NACK and retransmits them to the other end of the
-			 * connection.
-			 */
-			for _, datagram := range c.recoveryWindow.Lost() {
-				if err := c.flush(buffer.From(datagram), true); err != nil {
 					fmt.Printf("Retransmit: %v\n", err)
 					continue
 				}
@@ -559,6 +569,10 @@ func (c *Connection) writeNacks() error {
 // Writes the passed receipts to the other end of the connection. Returns an error if the
 // operation has failed.
 func (c *Connection) writeReceipts(sequences []uint32) error {
+	defer func() {
+		c.buffer.Reset()
+	}()
+
 	slices.Sort(sequences)
 	c.buffer.SetOffset(3)
 
@@ -617,13 +631,16 @@ func (c *Connection) writeReceipts(sequences []uint32) error {
 		return err
 	}
 
-	c.buffer.Reset()
 	return nil
 }
 
 // Writes a message to the raknet connection with the specified reliability and returns an error if the
 // operation has failed
 func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reliability) error {
+	defer func() {
+		c.buffer.Reset()
+	}()
+
 	/*
 	 * Encode the message to the internal buffer and split the serialised message
 	 * into one or more fragments.
@@ -728,7 +745,6 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 		}
 	}
 
-	c.buffer.Reset()
 	return nil
 }
 
@@ -736,24 +752,23 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 // mtu size of the connection. The sub slices if formed reference the data in the provided original slice
 // with 0 memory allocations.
 func (c *Connection) split(slice []byte) map[uint8][]byte {
-	max_mtu := c.mtu - protocol.UDP_HEADER_SIZE - protocol.FRAME_HEADER_SIZE - protocol.FRAME_BODY_SIZE
-
+	size := c.mtu - protocol.UDP_HEADER_SIZE - protocol.FRAME_HEADER_SIZE - protocol.FRAME_BODY_SIZE
 	len := len(slice)
 
-	if len > max_mtu {
-		max_mtu -= protocol.FRAME_ADDITIONAL_SIZE
+	if len > size {
+		size -= protocol.FRAME_ADDITIONAL_SIZE
 	}
 
-	count := len / max_mtu
-	if len%max_mtu != 0 {
+	count := len / size
+	if len%size != 0 {
 		count += 1
 	}
 
 	fragments := make(map[uint8][]byte, count)
 
 	for i := 0; i < count; i++ {
-		start := i * max_mtu
-		end := start + max_mtu
+		start := i * size
+		end := (i + 1) * size
 
 		if end > len {
 			end = len
@@ -768,6 +783,16 @@ func (c *Connection) split(slice []byte) map[uint8][]byte {
 // Flushes the provided serialised datagram to the other end of the connection. This function may
 // either accept a reference to the current batch or to a datagram that needs to be retransmitted.
 func (c *Connection) flush(buffer *buffer.Buffer, retransmit bool) error {
+	defer func() {
+		// If we are flushing a current batch then we should update the last flushed and reset the buffer
+		// to allow it to be reused again.
+		if !retransmit {
+			c.lastFlushed = time.Now()
+			buffer.Reset()
+			buffer.SetOffset(4)
+		}
+	}()
+
 	/*
 	* Reset the offset to 0 to write the header of the datagram such as it's flags
 	* and the sequence number which takes 4 bytes. Store the offset for later.
@@ -803,14 +828,6 @@ func (c *Connection) flush(buffer *buffer.Buffer, retransmit bool) error {
 	 */
 	if _, err := c.socket.WriteTo(bytes, c.peerAddr); err != nil {
 		return err
-	}
-
-	// If we are flushing a current batch then we should update the last flushed and reset the buffer
-	// to allow it to be reused again.
-	if !retransmit {
-		c.lastFlushed = time.Now()
-		buffer.Reset()
-		buffer.SetOffset(4)
 	}
 
 	return nil
