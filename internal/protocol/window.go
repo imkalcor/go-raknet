@@ -215,6 +215,20 @@ func (w *RecoveryWindow) Retransmit(seq uint32) []byte {
 	return nil
 }
 
+// Returns all the datagrams that were lost during transmission and for which we did not
+// receive neither an ACK nor a NACK.
+func (w *RecoveryWindow) Lost() [][]byte {
+	lost := make([][]byte, 0)
+
+	for seq, pk := range w.unacknowledged {
+		if time.Since(pk.timestamp) > TPS {
+			lost = append(lost, w.Retransmit(seq))
+		}
+	}
+
+	return lost
+}
+
 // Returns the average time taken by the other end of the connection to acknowledge or NACK
 // a sequence. This is also known as latency.
 func (w *RecoveryWindow) Rtt() time.Duration {

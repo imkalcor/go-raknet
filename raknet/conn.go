@@ -2,7 +2,9 @@ package raknet
 
 import (
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/gamevidea/binary/buffer"
@@ -57,10 +59,11 @@ type Connection struct {
 	splitID        uint16
 
 	batch  buffer.Buffer
-	msgbuf buffer.Buffer
+	buffer buffer.Buffer
 
 	dc   chan struct{}
 	send chan connectedMessage
+	retr chan buffer.Buffer
 }
 
 // Creates and returns a new Raknet Connection
@@ -80,10 +83,16 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		lastFlushed:    time.Now(),
 		receipts:       make([]uint32, 0, protocol.MAX_RECEIPTS),
 		state:          Connecting,
+		sequenceNumber: 0,
+		messageIndex:   0,
+		sequenceIndex:  0,
+		orderIndex:     0,
+		splitID:        0,
 		batch:          buffer.New(protocol.MAX_MTU_SIZE),
-		msgbuf:         buffer.New(protocol.MAX_MESSAGE_SIZE),
+		buffer:         buffer.New(protocol.MAX_MESSAGE_SIZE),
 		dc:             make(chan struct{}),
 		send:           make(chan connectedMessage),
+		retr:           make(chan buffer.Buffer),
 	}
 
 	go conn.handler()
@@ -191,7 +200,8 @@ func (c *Connection) readNack(b buffer.Buffer) error {
 	}
 
 	for _, seq := range c.receipts {
-		c.recoveryWindow.Retransmit(seq)
+		b := c.recoveryWindow.Retransmit(seq)
+		c.retr <- buffer.From(b)
 	}
 
 	fmt.Printf("NACKs: %v\n", c.receipts)
@@ -441,17 +451,69 @@ func (c *Connection) handler() {
 		case <-c.dc:
 			return
 		case <-time.After(protocol.TPS):
+			/*
+			 * Get all the messages in the send queue that need to be dispatched and write
+			 * it to the other end of the connection.
+			 */
 			for i := 0; i < len(c.send); i++ {
 				send := <-c.send
 
 				if err := c.writeMessage(send.msg, send.rlb); err != nil {
-					fmt.Printf("Conn Write: %v\n", err)
+					fmt.Printf("Transmit: %v\n", err)
 					continue
 				}
 			}
 
-			if time.Since(c.lastFlushed) > protocol.TPS && c.batch.Offset() > 0 {
-				c.flush()
+			/*
+			 * Get all the messages that need to be retransmitted to the other end of the
+			 * connection and flush them to the other end of the connection.
+			 */
+			for i := 0; i < len(c.retr); i++ {
+				buffer := <-c.retr
+
+				if err := c.flush(buffer, true); err != nil {
+					fmt.Printf("Retransmit: %v\n", err)
+					continue
+				}
+			}
+
+			/*
+			 * Gets all the datagrams that were lost during transmission and for which we did not
+			 * receive neither an ACK nor a NACK and retransmits them to the other end of the
+			 * connection.
+			 */
+			for _, datagram := range c.recoveryWindow.Lost() {
+				if err := c.flush(buffer.From(datagram), true); err != nil {
+					fmt.Printf("Retransmit: %v\n", err)
+					continue
+				}
+			}
+
+			/*
+			 * If one raknet tick has passed since last flush of the batch and there is some
+			 * data in the batch then flush the batch.
+			 */
+			if time.Since(c.lastFlushed) >= protocol.TPS && c.batch.Offset() > 0 {
+				c.flush(c.batch, false)
+			}
+
+			/*
+			 * Shift the sequence window as one tick has passed and write ACKs for those sequences
+			 * that we received within last tick and NACKs for those that we did not receive the
+			 * acknowledgement for.
+			 */
+			if len(c.sequenceWindow.Acks) > 0 {
+				if err := c.writeAcks(); err != nil {
+					fmt.Printf("Ack Write: %v\n", err)
+					continue
+				}
+			}
+
+			if len(c.sequenceWindow.Nacks) > 0 {
+				if err := c.writeNacks(); err != nil {
+					fmt.Printf("Nack Write: %v\n", err)
+					continue
+				}
 			}
 
 			c.sequenceWindow.Shift()
@@ -459,17 +521,127 @@ func (c *Connection) handler() {
 	}
 }
 
-// Writes a message to the raknet connection with the specified reliability and returns an error if the
-// operation has failed
-func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reliability) error {
-	if err := msg.Write(c.msgbuf); err != nil {
+// Writes the ACK receipts to the other end of the connection for those sequences that we have
+// received within the last tick. Returns an error if the operation failed.
+func (c *Connection) writeAcks() error {
+	sequences := maps.Keys(c.sequenceWindow.Acks)
+
+	if err := c.buffer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_ACK); err != nil {
 		return err
 	}
 
-	fragments := c.split(c.msgbuf.Bytes())
+	if err := c.writeReceipts(sequences); err != nil {
+		return err
+	}
+
+	clear(c.sequenceWindow.Acks)
+	return nil
+}
+
+// Writes the NACK receipts to the other end of the connection for those sequences that we have
+// not received within the last tick. Returns an error if the operation failed.
+func (c *Connection) writeNacks() error {
+	sequences := maps.Keys(c.sequenceWindow.Nacks)
+
+	if err := c.buffer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NACK); err != nil {
+		return err
+	}
+
+	if err := c.writeReceipts(sequences); err != nil {
+		return err
+	}
+
+	clear(c.sequenceWindow.Nacks)
+	return nil
+}
+
+// Writes the passed receipts to the other end of the connection. Returns an error if the
+// operation has failed.
+func (c *Connection) writeReceipts(sequences []uint32) error {
+	slices.Sort(sequences)
+	c.buffer.SetOffset(3)
+
+	first := sequences[0]
+	last := sequences[0]
+	var recordCount int16 = 0
+
+	for index := range sequences {
+		seq := sequences[index]
+
+		if seq == last+1 {
+			last = seq
+
+			if index != len(sequences)-1 {
+				continue
+			}
+		}
+
+		if first == last {
+			if err := c.buffer.WriteUint8(protocol.SingleRecord); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint24(first, byteorder.LittleEndian); err != nil {
+				return err
+			}
+		} else {
+			if err := c.buffer.WriteUint8(protocol.RangedRecord); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint24(first, byteorder.LittleEndian); err != nil {
+				return err
+			}
+
+			if err := c.buffer.WriteUint24(last, byteorder.LittleEndian); err != nil {
+				return err
+			}
+		}
+
+		first = seq
+		last = seq
+		recordCount += 1
+	}
+
+	offset := c.buffer.Offset()
+	c.buffer.SetOffset(1)
+
+	if err := c.buffer.WriteInt16(recordCount, byteorder.BigEndian); err != nil {
+		return err
+	}
+
+	c.buffer.SetOffset(offset)
+
+	if _, err := c.socket.WriteTo(c.buffer.Bytes(), c.peerAddr); err != nil {
+		return err
+	}
+
+	c.buffer.Reset()
+	return nil
+}
+
+// Writes a message to the raknet connection with the specified reliability and returns an error if the
+// operation has failed
+func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reliability) error {
+	/*
+	 * Encode the message to the internal buffer and split the serialised message
+	 * into one or more fragments.
+	 */
+	if err := msg.Write(c.buffer); err != nil {
+		return err
+	}
+
+	/*
+	 * The order index remains the same throughout all the fragments if any. So does
+	 * the split ID.
+	 */
+	fragments := c.split(c.buffer.Bytes())
 	orderIndex := c.orderIndex
 	c.orderIndex += 1
 
+	/*
+	 * Calculate the fragment count, fragment ID, and other data related to fragments
+	 */
 	splitCount := len(fragments)
 	splitID := c.splitID
 	split := splitCount > 1
@@ -482,8 +654,13 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 		content := fragments[uint8(splitIndex)]
 		max_size := c.batch.Remaining() - protocol.FRAME_BODY_SIZE
 
+		/*
+		 * If the content's size cannot be accomodated within the available space in the
+		 * current batch then flush the current batch to the socket immediately and reset
+		 * the buffer.
+		 */
 		if len(content) > max_size {
-			c.flush()
+			c.flush(c.batch, false)
 		}
 
 		header := byte(reliability) << 5
@@ -541,12 +718,16 @@ func (c *Connection) writeMessage(msg message.Message, reliability protocol.Reli
 			return err
 		}
 
+		/*
+		 * If the reliability type is not Reliable Ordered then we should immediately flush to the
+		 * socket as internal messages mostly sent a Unreliable should be sent immediately.
+		 */
 		if reliability != protocol.ReliableOrdered {
-			c.flush()
+			c.flush(c.batch, false)
 		}
 	}
 
-	c.msgbuf.Reset()
+	c.buffer.Reset()
 	return nil
 }
 
@@ -583,30 +764,32 @@ func (c *Connection) split(slice []byte) map[uint8][]byte {
 	return fragments
 }
 
-// Flushes the current batch of datagram which is ready to be sent to the peer. Returns an error if the operation
-// has failed.
-func (c *Connection) flush() error {
-	// Reset the offset to 0 to write the header of the datagram such as it's flags
-	// and the sequence number which takes 4 bytes. Store the offset for later.
-	offset := c.batch.Offset()
-	c.batch.SetOffset(0)
+// Flushes the provided serialised datagram to the other end of the connection. This function may
+// either accept a reference to the current batch or to a datagram that needs to be retransmitted.
+func (c *Connection) flush(buffer buffer.Buffer, retransmit bool) error {
+	/*
+	* Reset the offset to 0 to write the header of the datagram such as it's flags
+	* and the sequence number which takes 4 bytes. Store the offset for later.
+	 */
+	offset := buffer.Offset()
+	buffer.SetOffset(0)
 
-	if err := c.batch.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NEEDS_B_AND_AS); err != nil {
+	if err := buffer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NEEDS_B_AND_AS); err != nil {
 		return err
 	}
 
-	if err := c.batch.WriteUint24(c.sequenceNumber, byteorder.LittleEndian); err != nil {
+	if err := buffer.WriteUint24(c.sequenceNumber, byteorder.LittleEndian); err != nil {
 		return err
 	}
 
 	// Reset the offset back to the one we stored earlier so we obtain correct slice
 	// upon invoking c.writer.Bytes()
-	c.batch.SetOffset(offset)
+	buffer.SetOffset(offset)
 
 	// Create a new copy of the buffer without the header data to store it in the recovery map
 	// for retransmission of datagram with new sequence number.
-	bytes := make([]byte, offset-4)
-	copy(bytes, c.batch.Bytes()[4:])
+	bytes := make([]byte, offset)
+	copy(bytes, buffer.Bytes())
 
 	// Add the serialized datagram into the recovery window without the header data so that
 	// new sequence number could be assigned to it upon retransmission.
@@ -617,13 +800,17 @@ func (c *Connection) flush() error {
 	 * Flush the datagram to the socket and reset the buffer's internal cursor buffer to start from
 	 * 4th index so that header can be prepended in the end upon flushing.
 	 */
-	if _, err := c.socket.WriteTo(c.batch.Bytes(), c.peerAddr); err != nil {
+	if _, err := c.socket.WriteTo(bytes, c.peerAddr); err != nil {
 		return err
 	}
 
-	c.batch.Reset()
-	c.batch.SetOffset(4)
+	// If we are flushing a current batch then we should update the last flushed and reset the buffer
+	// to allow it to be reused again.
+	if !retransmit {
+		c.lastFlushed = time.Now()
+		buffer.Reset()
+		buffer.SetOffset(4)
+	}
 
-	c.lastFlushed = time.Now()
 	return nil
 }
