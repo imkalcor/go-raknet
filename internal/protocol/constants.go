@@ -72,4 +72,4 @@ const MAX_MESSAGE_SIZE int = 8000
 
 // TPS is the ticks per second at which various raknet logic such as ACKs, NACKs, and state updates
 // are performed.
-const TPS time.Duration = time.Second * 100
+const TPS time.Duration = time.Millisecond * 100

@@ -18,7 +18,7 @@ type OpenConnectionReply2 struct {
 
 // Reads an open connection reply 2 message from the buffer and returns an error if the operation
 // has failed
-func (pk *OpenConnectionReply2) Read(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionReply2) Read(buf *buffer.Buffer) (err error) {
 	if err = buf.ReadMagic(); err != nil {
 		return
 	}
@@ -44,7 +44,7 @@ func (pk *OpenConnectionReply2) Read(buf buffer.Buffer) (err error) {
 
 // Writes an open connection reply 2 message to the buffer and returns an error if the operation
 // has failed
-func (pk *OpenConnectionReply2) Write(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionReply2) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDOpenConnectionReply2); err != nil {
 		return
 	}

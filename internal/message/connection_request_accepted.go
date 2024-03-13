@@ -17,7 +17,7 @@ type ConnectionRequestAccepted struct {
 
 // Reads the connection request accepted message from the buffer and returns an error if the
 // operation has failed.
-func (pk *ConnectionRequestAccepted) Read(buf buffer.Buffer) (err error) {
+func (pk *ConnectionRequestAccepted) Read(buf *buffer.Buffer) (err error) {
 	if err = buf.ReadAddr(&pk.ClientAddress); err != nil {
 		return
 	}
@@ -43,7 +43,7 @@ func (pk *ConnectionRequestAccepted) Read(buf buffer.Buffer) (err error) {
 
 // Writes a connection request accepted message to the underlying buffer and returns an error if
 // the operation has failed
-func (pk *ConnectionRequestAccepted) Write(buf buffer.Buffer) (err error) {
+func (pk *ConnectionRequestAccepted) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDConnectionRequestAccepted); err != nil {
 		return
 	}

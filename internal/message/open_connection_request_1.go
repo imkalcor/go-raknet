@@ -17,7 +17,7 @@ type OpenConnectionRequest1 struct {
 
 // Reads an open connection request 1 from the buffer and returns an error if the operation
 // failed.
-func (pk *OpenConnectionRequest1) Read(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionRequest1) Read(buf *buffer.Buffer) (err error) {
 	pk.DiscoveringMTU = protocol.UDP_HEADER_SIZE + protocol.MESSAGE_ID_SIZE + buf.Remaining()
 
 	if err = buf.ReadMagic(); err != nil {
@@ -33,7 +33,7 @@ func (pk *OpenConnectionRequest1) Read(buf buffer.Buffer) (err error) {
 
 // Writes an open connection request 1 into the buffer and returns an error if the operation
 // failed.
-func (pk *OpenConnectionRequest1) Write(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionRequest1) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDOpenConnectionRequest1); err != nil {
 		return
 	}

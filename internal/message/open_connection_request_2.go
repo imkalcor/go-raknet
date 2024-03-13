@@ -20,7 +20,7 @@ type OpenConnectionRequest2 struct {
 
 // Reads an open connection request 2 message from the buffer and returns an error if operation
 // has failed
-func (pk *OpenConnectionRequest2) Read(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionRequest2) Read(buf *buffer.Buffer) (err error) {
 	if err = buf.ReadMagic(); err != nil {
 		return
 	}
@@ -42,7 +42,7 @@ func (pk *OpenConnectionRequest2) Read(buf buffer.Buffer) (err error) {
 
 // Writes an open connection request 2 to the buffer and returns an error if the operation
 // has failed
-func (pk *OpenConnectionRequest2) Write(buf buffer.Buffer) (err error) {
+func (pk *OpenConnectionRequest2) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDOpenConnectionRequest2); err != nil {
 		return
 	}

@@ -2,7 +2,6 @@ package raknet
 
 import (
 	"fmt"
-	"maps"
 	"net"
 	"slices"
 	"time"
@@ -58,12 +57,12 @@ type Connection struct {
 	orderIndex     uint32
 	splitID        uint16
 
-	batch  buffer.Buffer
-	buffer buffer.Buffer
+	batch  *buffer.Buffer
+	buffer *buffer.Buffer
 
 	dc   chan struct{}
 	send chan connectedMessage
-	retr chan buffer.Buffer
+	retr chan *buffer.Buffer
 }
 
 // Creates and returns a new Raknet Connection
@@ -91,8 +90,8 @@ func newConn(localAddr *net.UDPAddr, peerAddr *net.UDPAddr, socket *net.UDPConn,
 		batch:          buffer.New(protocol.MAX_MTU_SIZE),
 		buffer:         buffer.New(protocol.MAX_MESSAGE_SIZE),
 		dc:             make(chan struct{}),
-		send:           make(chan connectedMessage),
-		retr:           make(chan buffer.Buffer),
+		send:           make(chan connectedMessage, 250),
+		retr:           make(chan *buffer.Buffer, 250),
 	}
 
 	go conn.handler()
@@ -151,7 +150,7 @@ func (c *Connection) checkState(ch chan *Connection) {
 }
 
 // Reads an incoming datagram on the socket destined from the connection's peer address.
-func (c *Connection) readDatagram(b buffer.Buffer) error {
+func (c *Connection) readDatagram(b *buffer.Buffer) error {
 	header, err := b.ReadUint8()
 	if err != nil {
 		return err
@@ -179,7 +178,7 @@ func (c *Connection) readDatagram(b buffer.Buffer) error {
 }
 
 // Reads an ack receipt destined from the connection's peer address.
-func (c *Connection) readAck(b buffer.Buffer) error {
+func (c *Connection) readAck(b *buffer.Buffer) error {
 	if err := c.readReceipts(b); err != nil {
 		return err
 	}
@@ -194,7 +193,7 @@ func (c *Connection) readAck(b buffer.Buffer) error {
 }
 
 // Reads an nack receipt destined from the connection's peer address.
-func (c *Connection) readNack(b buffer.Buffer) error {
+func (c *Connection) readNack(b *buffer.Buffer) error {
 	if err := c.readReceipts(b); err != nil {
 		return err
 	}
@@ -211,7 +210,7 @@ func (c *Connection) readNack(b buffer.Buffer) error {
 
 // Reads an ack or nack receipt from the buffer and returns an error if the operation
 // has failed.
-func (c *Connection) readReceipts(b buffer.Buffer) error {
+func (c *Connection) readReceipts(b *buffer.Buffer) error {
 	recordsCount, err := b.ReadInt16(byteorder.BigEndian)
 	if err != nil {
 		return err
@@ -255,7 +254,7 @@ func (c *Connection) readReceipts(b buffer.Buffer) error {
 
 // Reads a raknet frame message from the buffer and returns an error if the operation
 // has failed.
-func (c *Connection) readFrame(b buffer.Buffer) error {
+func (c *Connection) readFrame(b *buffer.Buffer) error {
 	seq, err := b.ReadUint24(byteorder.LittleEndian)
 	if err != nil {
 		return err
@@ -281,7 +280,8 @@ func (c *Connection) readFrame(b buffer.Buffer) error {
 			return err
 		}
 
-		if length >>= 3; length == 0 {
+		length >>= 3
+		if length == 0 {
 			return ILN_ERROR
 		}
 
@@ -300,17 +300,6 @@ func (c *Connection) readFrame(b buffer.Buffer) error {
 
 		if reliability.SequencedOrdered() {
 			b.Shift(3 + 1)
-		}
-
-		if reliability.Reliable() && !c.messageWindow.Receive(messageIndex) {
-			shift := int(length)
-
-			if split {
-				shift += protocol.FRAME_ADDITIONAL_SIZE
-			}
-
-			b.Shift(shift)
-			continue
 		}
 
 		var splitCount uint32
@@ -339,6 +328,10 @@ func (c *Connection) readFrame(b buffer.Buffer) error {
 			return err
 		}
 
+		if reliability.Reliable() && !c.messageWindow.Receive(messageIndex) {
+			continue
+		}
+
 		if split {
 			if splitCount > protocol.MAX_FRAGMENT_COUNT {
 				return EMF_ERROR
@@ -349,15 +342,17 @@ func (c *Connection) readFrame(b buffer.Buffer) error {
 				splits = protocol.CreateSplitWindow(splitCount)
 			}
 
-			if c := splits.Receive(splitIndex, content); c != nil {
-				content = c
+			if content := splits.Receive(splitIndex, content); content != nil {
+				if err := c.readMessage(content); err != nil {
+					return err
+				}
 			}
 
 			c.splitWindow[splitID] = splits
-		}
-
-		if err := c.readMessage(content); err != nil {
-			return err
+		} else {
+			if err := c.readMessage(content); err != nil {
+				return err
+			}
 		}
 
 		count += 1
@@ -392,7 +387,7 @@ func (c *Connection) readMessage(content []byte) error {
 }
 
 // Handles an incoming connected ping from the peer and returns an error if the operation has failed
-func (c *Connection) handleConnectedPing(b buffer.Buffer) error {
+func (c *Connection) handleConnectedPing(b *buffer.Buffer) error {
 	msg := message.ConnectedPing{}
 	if err := msg.Read(b); err != nil {
 		return err
@@ -412,7 +407,7 @@ func (c *Connection) handleConnectedPing(b buffer.Buffer) error {
 }
 
 // Handles an incoming connection request from the peer and returns an error if the operation has failed
-func (c *Connection) handleConnectionRequest(b buffer.Buffer) error {
+func (c *Connection) handleConnectionRequest(b *buffer.Buffer) error {
 	msg := message.ConnectionRequest{}
 	if err := msg.Read(b); err != nil {
 		return err
@@ -433,7 +428,7 @@ func (c *Connection) handleConnectionRequest(b buffer.Buffer) error {
 }
 
 // Handles an incoming connection from the peer and returns an error if the operation has failed
-func (c *Connection) handleNewIncomingConnection(b buffer.Buffer) error {
+func (c *Connection) handleNewIncomingConnection(b *buffer.Buffer) error {
 	msg := message.NewIncomingConnection{}
 	if err := msg.Read(b); err != nil {
 		return err
@@ -524,7 +519,10 @@ func (c *Connection) handler() {
 // Writes the ACK receipts to the other end of the connection for those sequences that we have
 // received within the last tick. Returns an error if the operation failed.
 func (c *Connection) writeAcks() error {
-	sequences := maps.Keys(c.sequenceWindow.Acks)
+	sequences := make([]uint32, 0, len(c.sequenceWindow.Acks))
+	for k := range c.sequenceWindow.Acks {
+		sequences = append(sequences, k)
+	}
 
 	if err := c.buffer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_ACK); err != nil {
 		return err
@@ -541,7 +539,10 @@ func (c *Connection) writeAcks() error {
 // Writes the NACK receipts to the other end of the connection for those sequences that we have
 // not received within the last tick. Returns an error if the operation failed.
 func (c *Connection) writeNacks() error {
-	sequences := maps.Keys(c.sequenceWindow.Nacks)
+	sequences := make([]uint32, 0, len(c.sequenceWindow.Nacks))
+	for k := range c.sequenceWindow.Nacks {
+		sequences = append(sequences, k)
+	}
 
 	if err := c.buffer.WriteUint8(protocol.FLAG_DATAGRAM | protocol.FLAG_NACK); err != nil {
 		return err
@@ -766,7 +767,7 @@ func (c *Connection) split(slice []byte) map[uint8][]byte {
 
 // Flushes the provided serialised datagram to the other end of the connection. This function may
 // either accept a reference to the current batch or to a datagram that needs to be retransmitted.
-func (c *Connection) flush(buffer buffer.Buffer, retransmit bool) error {
+func (c *Connection) flush(buffer *buffer.Buffer, retransmit bool) error {
 	/*
 	* Reset the offset to 0 to write the header of the datagram such as it's flags
 	* and the sequence number which takes 4 bytes. Store the offset for later.

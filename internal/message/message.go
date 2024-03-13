@@ -28,6 +28,6 @@ const (
 // Message represents a raknet message that may be either connected or unconnected depending upon
 // the connection status.
 type Message interface {
-	Read(buf buffer.Buffer) (err error)
-	Write(buf buffer.Buffer) (err error)
+	Read(buf *buffer.Buffer) (err error)
+	Write(buf *buffer.Buffer) (err error)
 }

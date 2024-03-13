@@ -17,7 +17,7 @@ type NewIncomingConnection struct {
 
 // Reads a new incoming connection message from the buffer and returns an error if the operation
 // has failed
-func (pk *NewIncomingConnection) Read(buf buffer.Buffer) (err error) {
+func (pk *NewIncomingConnection) Read(buf *buffer.Buffer) (err error) {
 	if err = buf.ReadAddr(&pk.ServerAddress); err != nil {
 		return
 	}
@@ -39,7 +39,7 @@ func (pk *NewIncomingConnection) Read(buf buffer.Buffer) (err error) {
 
 // Writes a new incoming connection message to the buffer and returns an error if the operation
 // has failed
-func (pk *NewIncomingConnection) Write(buf buffer.Buffer) (err error) {
+func (pk *NewIncomingConnection) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDNewIncomingConnection); err != nil {
 		return
 	}

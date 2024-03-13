@@ -52,8 +52,8 @@ type Listener struct {
 	conn chan *Connection
 	send chan unconnectedMessage
 
-	reader buffer.Buffer
-	writer buffer.Buffer
+	reader *buffer.Buffer
+	writer *buffer.Buffer
 }
 
 // Listen announces on the local network address. Creates a new Raknet Listener and binds the listener
@@ -116,6 +116,7 @@ func (l *Listener) udpReader() {
 			continue
 		}
 
+		fmt.Printf("Received %d bytes from %v\n", len, addr)
 		l.reader.Resize(len)
 
 		if conn, ok := l.connections[addr.String()]; ok {

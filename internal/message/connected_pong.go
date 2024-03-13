@@ -15,7 +15,7 @@ type ConnectedPong struct {
 
 // Reads a connected pong message from the buffer and returns an error if the operation
 // has failed
-func (pk *ConnectedPong) Read(buf buffer.Buffer) (err error) {
+func (pk *ConnectedPong) Read(buf *buffer.Buffer) (err error) {
 	if pk.ClientTimestamp, err = buf.ReadInt64(byteorder.BigEndian); err != nil {
 		return
 	}
@@ -29,7 +29,7 @@ func (pk *ConnectedPong) Read(buf buffer.Buffer) (err error) {
 
 // Writes a connected pong message from the buffer and returns an error if the operation
 // has failed
-func (pk *ConnectedPong) Write(buf buffer.Buffer) (err error) {
+func (pk *ConnectedPong) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDConnectedPong); err != nil {
 		return
 	}

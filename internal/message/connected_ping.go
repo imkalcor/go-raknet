@@ -12,13 +12,13 @@ type ConnectedPing struct {
 }
 
 // Reads a connected ping message and returns an error if the operation failed
-func (pk *ConnectedPing) Read(buf buffer.Buffer) (err error) {
+func (pk *ConnectedPing) Read(buf *buffer.Buffer) (err error) {
 	pk.ClientTimestamp, err = buf.ReadInt64(byteorder.BigEndian)
 	return
 }
 
 // Writes a connected ping message and returns an error if the operation has failed
-func (pk *ConnectedPing) Write(buf buffer.Buffer) (err error) {
+func (pk *ConnectedPing) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDConnectedPing); err != nil {
 		return
 	}

@@ -14,7 +14,7 @@ type UnconnectedPing struct {
 
 // Reads an unconnected ping message from the buffer and returns an error if the operation
 // failed.
-func (pk *UnconnectedPing) Read(buf buffer.Buffer) (err error) {
+func (pk *UnconnectedPing) Read(buf *buffer.Buffer) (err error) {
 	if pk.SendTimestamp, err = buf.ReadInt64(byteorder.BigEndian); err != nil {
 		return
 	}
@@ -32,7 +32,7 @@ func (pk *UnconnectedPing) Read(buf buffer.Buffer) (err error) {
 
 // Writes an unconnected ping message into the buffer and returns an error if the operation
 // failed.
-func (pk *UnconnectedPing) Write(buf buffer.Buffer) (err error) {
+func (pk *UnconnectedPing) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDUnconnectedPing); err != nil {
 		return
 	}

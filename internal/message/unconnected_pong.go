@@ -15,7 +15,7 @@ type UnconnectedPong struct {
 
 // Reads unconnected pong from the underlying buffer and returns an error if the operation
 // failed.
-func (pk *UnconnectedPong) Read(buf buffer.Buffer) (err error) {
+func (pk *UnconnectedPong) Read(buf *buffer.Buffer) (err error) {
 	if pk.SendTimestamp, err = buf.ReadInt64(byteorder.BigEndian); err != nil {
 		return
 	}
@@ -37,7 +37,7 @@ func (pk *UnconnectedPong) Read(buf buffer.Buffer) (err error) {
 
 // Writes an Unconnected Pong message to the underlying buffer and returns an error if the operation
 // failed.
-func (pk *UnconnectedPong) Write(buf buffer.Buffer) (err error) {
+func (pk *UnconnectedPong) Write(buf *buffer.Buffer) (err error) {
 	if err = buf.WriteUint8(IDUnconnectedPong); err != nil {
 		return
 	}
