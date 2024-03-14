@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"time"
+
+	"github.com/gamevidea/binary/buffer"
 )
 
 // SequenceWindow helps in filtering the incoming RakNet datagrams by preventing any datagrams that have
@@ -163,7 +165,7 @@ func (w *SplitWindow) Receive(index uint32, fragment []byte) []byte {
 // connection. It contains the time at which we sent the datagram which is useful for calculating
 // latency, and also contains the encoded bytes that will be useful when retransmitting this datagram.
 type Record struct {
-	packet    []byte
+	packet    *buffer.Buffer
 	timestamp time.Time
 }
 
@@ -184,7 +186,7 @@ func CreateRecoveryWindow() RecoveryWindow {
 }
 
 // Adds the datagram's frame data serial to the Recovery Window.
-func (w *RecoveryWindow) Add(seq uint32, packet []byte) {
+func (w *RecoveryWindow) Add(seq uint32, packet *buffer.Buffer) {
 	w.unacknowledged[seq] = &Record{
 		packet:    packet,
 		timestamp: time.Now(),
@@ -203,7 +205,7 @@ func (w *RecoveryWindow) Acknowledge(seq uint32) {
 
 // Returns the datagram's frame data serialized in bytes if found for the provided
 // sequence for retransmission purposes.
-func (w *RecoveryWindow) Retransmit(seq uint32) []byte {
+func (w *RecoveryWindow) Retransmit(seq uint32) *buffer.Buffer {
 	record, ok := w.unacknowledged[seq]
 
 	if ok {
@@ -217,8 +219,8 @@ func (w *RecoveryWindow) Retransmit(seq uint32) []byte {
 
 // Returns all the datagrams that were lost during transmission and for which we did not
 // receive neither an ACK nor a NACK.
-func (w *RecoveryWindow) Lost() [][]byte {
-	lost := make([][]byte, 0)
+func (w *RecoveryWindow) Lost() []*buffer.Buffer {
+	lost := make([]*buffer.Buffer, 0)
 
 	for seq, pk := range w.unacknowledged {
 		if time.Since(pk.timestamp) > TPS {

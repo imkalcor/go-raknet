@@ -72,4 +72,18 @@ const MAX_MESSAGE_SIZE int = 8000
 
 // TPS is the ticks per second at which various raknet logic such as ACKs, NACKs, and state updates
 // are performed.
-const TPS time.Duration = time.Millisecond * 100
+const TPS = time.Millisecond * 100
+
+// This is the number of maximum messages a raknet connection can send us per second before
+// they get blocked
+const MAX_MSGS_PER_SEC = 1000
+
+// This is the number of maximum invalid / corrupt messages a raknet connection can send us
+// before we block them
+const MAX_INVALID_MSGS = 20
+
+// This is the duration for which we should block a bad raknet connection
+const BLOCK_DUR = time.Second * 10
+
+// If a raknet connection is not responding for more than this time then it is considered a timeout
+const TIMEOUT = time.Second * 5
