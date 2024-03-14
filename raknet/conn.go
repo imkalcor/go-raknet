@@ -13,9 +13,6 @@ import (
 	"github.com/gamevidea/raknet/internal/protocol"
 )
 
-// This error is sent when a client tries to login to the server again
-var ErrDuplicateLogin = errors.New("the client has tried to login again")
-
 // This error is sent when a buffer does not start with the flag datagram as all
 // raknet datagrams must have the datagram flag.
 var ErrCorruptDatagram = errors.New("the buffer does not appear to have flag datagram")
@@ -39,6 +36,7 @@ type State = uint8
 const (
 	Connecting State = iota
 	Connected
+	Disconnecting
 	Disconnected
 )
 
@@ -162,10 +160,24 @@ func (c *Connection) Write(data []byte) {
 	}
 }
 
-// Disconnects the connection. Sends a notification to all worker threads for the connection
-// that they should stop. Handles the remaining left packets and sends a disconnect notification.
+// Sends a disconnect notification to gracefully shut down this connection. It takes around 5 raknet ticks to
+// fully shutdown the connection ensuring all packets are flushed.
 func (c *Connection) Disconnect() {
-	c.dc <- struct{}{}
+	c.state = Disconnecting
+
+	go func() {
+		time.Sleep(protocol.TPS * 3)
+
+		c.send <- connectedMessage{
+			msg: &message.Disconnect{},
+			rlb: protocol.Unreliable,
+		}
+
+		time.Sleep(protocol.TPS * 2)
+
+		c.state = Disconnected
+		c.dc <- struct{}{}
+	}()
 }
 
 // Checks the connection's state and sends it over to the channel provided once it is ready so that
@@ -196,7 +208,8 @@ func (c *Connection) readDatagram(b *buffer.Buffer) error {
 	}
 
 	if header == message.IDUnconnectedPing || header == message.IDUnconnectedPingOpenConnections {
-		return ErrDuplicateLogin
+		c.Disconnect()
+		return nil
 	}
 
 	if header&protocol.FLAG_DATAGRAM == 0 {
@@ -410,7 +423,7 @@ func (c *Connection) readMessage(content []byte) error {
 		return err
 	}
 
-	fmt.Printf("ID: %d\n", id)
+	//fmt.Printf("ID: %d\n", id)
 
 	switch id {
 	case message.IDConnectedPing:
@@ -428,7 +441,7 @@ func (c *Connection) readMessage(content []byte) error {
 	case message.IDDetectLostConnections:
 		return c.handleDetectLostConnections(b)
 	case message.IDDisconnectNotification:
-		c.dc <- struct{}{}
+		c.Disconnect()
 	}
 	return nil
 }

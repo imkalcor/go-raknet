@@ -43,8 +43,8 @@ type Listener struct {
 	socket *net.UDPConn
 	guid   int64
 
-	connections map[string]*Connection
-	blocked     map[string]time.Time
+	connections sync.Map
+	blocked     sync.Map
 
 	datagramMetrics   map[string]*DatagramMetrics
 	datagramIntegrity map[string]byte
@@ -74,8 +74,8 @@ func Listen(addr string) (*Listener, error) {
 		addr:              udpAddr,
 		socket:            socket,
 		guid:              rand.Int63(),
-		connections:       map[string]*Connection{},
-		blocked:           map[string]time.Time{},
+		connections:       sync.Map{},
+		blocked:           sync.Map{},
 		datagramMetrics:   map[string]*DatagramMetrics{},
 		datagramIntegrity: map[string]byte{},
 		dc:                make(chan struct{}),
@@ -110,7 +110,7 @@ func (l *Listener) Accept() *Connection {
 // Blocks the provided address for the specified duration and prevents the listener
 // from handling and channeling any packets received from this address.
 func (l *Listener) Block(addr string, dur time.Duration) {
-	l.blocked[addr] = time.Now().Add(dur)
+	l.blocked.Store(addr, time.Now().Add(dur))
 
 	if metrics, ok := l.datagramMetrics[addr]; ok {
 		metrics.count = 0
@@ -122,7 +122,7 @@ func (l *Listener) Block(addr string, dur time.Duration) {
 
 // Returns whether the provided address is blocked from the socket
 func (l *Listener) Blocked(addr string) bool {
-	_, ok := l.blocked[addr]
+	_, ok := l.blocked.Load(addr)
 	return ok
 }
 
@@ -157,8 +157,8 @@ func (l *Listener) udpReader() {
 				continue
 			}
 
-			if conn, ok := l.connections[addr.String()]; ok {
-				if err := conn.readDatagram(l.reader); err != nil {
+			if conn, ok := l.connections.Load(addr.String()); ok {
+				if err := conn.(*Connection).readDatagram(l.reader); err != nil {
 					fmt.Printf("Conn Handle: %v\n", err)
 				}
 
@@ -204,16 +204,33 @@ func (l *Listener) handler() {
 	for {
 		select {
 		case <-l.dc:
-			for _, conn := range l.connections {
-				conn.dc <- struct{}{}
-			}
+			l.connections.Range(func(key, value any) bool {
+				value.(*Connection).dc <- struct{}{}
+				return true
+			})
 			return
 		case <-time.After(protocol.TPS):
-			for addr, expiry := range l.blocked {
-				if time.Since(expiry) > 0 {
-					delete(l.blocked, addr)
+			l.blocked.Range(func(key, value any) bool {
+				if time.Since(value.(time.Time)) > 0 {
+					l.blocked.Delete(key)
 				}
-			}
+
+				return true
+			})
+
+			l.connections.Range(func(key, value any) bool {
+				conn := value.(*Connection)
+
+				if conn.state == Disconnected {
+					l.connections.Delete(key)
+				}
+
+				if time.Since(conn.lastActivity) > protocol.TIMEOUT {
+					conn.Disconnect()
+				}
+
+				return true
+			})
 		}
 	}
 }
@@ -263,7 +280,7 @@ func (l *Listener) handle(addr *net.UDPAddr) error {
 		return err
 	}
 
-	fmt.Printf("ID: %d\n", id)
+	//fmt.Printf("ID: %d\n", id)
 
 	switch id {
 	case message.IDUnconnectedPing, message.IDUnconnectedPingOpenConnections:
@@ -365,6 +382,6 @@ func (l *Listener) handleOpenConnectionRequest2(addr *net.UDPAddr) (err error) {
 	conn := newConn(l.addr, addr, l.socket, mtu)
 	go conn.checkState(l.conn)
 
-	l.connections[addr.String()] = conn
+	l.connections.Store(addr.String(), conn)
 	return
 }
