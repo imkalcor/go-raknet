@@ -11,7 +11,7 @@ provides a custom implementation of a fast buffer to read and write various data
 This library is highly optimised and highly concurrent. It is multithreaded wherever required to distribute the processing load on other threads if the work is substantial enough 
 to cover the cost of spawning a goroutine.
 
-# Creating a Server
+## Creating a Server
 
 ```go
   listener, err := raknet.Listen("127.0.0.1:19132")
@@ -24,7 +24,7 @@ to that address.
   conn := listener.Accept()
 ```
 
-# Creating a Client
+## Creating a Client
 
 ```go
   conn, err := raknet.Connect("hivebedrock.network:19132")
@@ -33,7 +33,7 @@ to that address.
 The above code is blocking as it waits until a full connection is established to the provided remote server. It may return an error depending upon whether
 either address was invalid, or connection timed out, or connection failed due to other reasons.
 
-# Sending and receiving packets
+## Sending and receiving packets
 
 The above line is blocking as it waits until a connection is available for it to be returned from the Listener. Usually, a for loop is created to keep accepting new connections from the
 listener and then handling of packets from those connections is done on different threads by spawning a goroutine for each one of them.
@@ -50,8 +50,6 @@ The above line is also blocking as it waits until a connection sends a packet an
 ```
 
 The above code is non blocking as it schedules a packet to be dispatched to the other end of the connection and returns immediately.
-
-# Batching
 
 Packets sent through raknet are batched together to allow network efficient delivery of the packets while saving bandwidth. They may either be sent to the peer by the end of the 
 raknet tick OR may be sent earlier if the current batch we're writing to does not have enough space for accomodating successive packets, we flush the batch, reset it and then start
